@@ -87,6 +87,34 @@ restore_attributes() {
     echo -e "\n${BLUE}Initializing permission restoration...${RESET}"
     echo -e "${BLUE}┌─ Analyzing filesystem structure...${RESET}"
     
+    # Process symlinks first using the special symlink info file
+    if [ -f "${REPACK_INFO}/symlink_info.txt" ]; then
+        echo -e "${BLUE}Restoring symlink attributes...${RESET}"
+        while read -r line; do
+            # Skip comments
+            [[ "$line" =~ ^#.*$ ]] && continue
+            
+            # Format: path target uid gid mode context
+            path=$(echo "$line" | awk '{print $1}')
+            target=$(echo "$line" | awk '{print $2}')
+            uid=$(echo "$line" | awk '{print $3}')
+            gid=$(echo "$line" | awk '{print $4}')
+            mode=$(echo "$line" | awk '{print $5}')
+            context=$(echo "$line" | awk '{print $6}')
+            
+            full_path="$1$path"
+            
+            # Recreate symlink if it doesn't exist
+            if [ ! -L "$full_path" ]; then
+                ln -sf "$target" "$full_path"
+            fi
+            
+            # Set ownership and context
+            chown -h "$uid:$gid" "$full_path" 2>/dev/null || true
+            [ -n "$context" ] && chcon -h "$context" "$full_path" 2>/dev/null || true
+        done < "${REPACK_INFO}/symlink_info.txt"
+    fi
+    
     # Get filesystem counts
     DIR_COUNT=$(find "$1" -type d | wc -l)
     FILE_COUNT=$(find "$1" -type f | wc -l)

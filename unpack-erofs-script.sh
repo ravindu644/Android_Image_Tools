@@ -174,6 +174,10 @@ processed=0
 spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
 spin=0
 
+# Create a special file for symlink info
+SYMLINK_INFO="${REPACK_INFO}/symlink_info.txt"
+echo "# Symlink info extracted from $IMAGE_FILE on $(date)" > "$SYMLINK_INFO"
+
 find "$MOUNT_DIR" -mindepth 1 | while read -r item; do
     processed=$((processed + 1))
     percentage=$((processed * 100 / total_items))
@@ -184,12 +188,20 @@ find "$MOUNT_DIR" -mindepth 1 | while read -r item; do
     
     rel_path=${item#$MOUNT_DIR}
     
-    # Get basic attributes and context
-    stats=$(stat -c "%u %g %a" "$item" 2>/dev/null)
-    context=$(ls -dZ "$item" 2>/dev/null | awk '{print $1}')
-    
-    [ -n "$stats" ] && echo "$rel_path $stats" >> "$FS_CONFIG_FILE"
-    [ -n "$context" ] && [ "$context" != "?" ] && echo "$rel_path $context" >> "$FILE_CONTEXTS_FILE"
+    # Special handling for symlinks
+    if [ -L "$item" ]; then
+        target=$(readlink "$item")
+        stats=$(stat -c "%u %g %a" "$item" 2>/dev/null)
+        context=$(ls -dZ "$item" 2>/dev/null | awk '{print $1}')
+        echo "$rel_path $target $stats $context" >> "$SYMLINK_INFO"
+    else
+        # Get basic attributes and context
+        stats=$(stat -c "%u %g %a" "$item" 2>/dev/null)
+        context=$(ls -dZ "$item" 2>/dev/null | awk '{print $1}')
+        
+        [ -n "$stats" ] && echo "$rel_path $stats" >> "$FS_CONFIG_FILE"
+        [ -n "$context" ] && [ "$context" != "?" ] && echo "$rel_path $context" >> "$FILE_CONTEXTS_FILE"
+    fi
 done
 echo -e "\r${GREEN}[✓] Attributes extracted successfully${RESET}\n"
 
