@@ -75,19 +75,28 @@ fi
 # Find modified or new files compared to the attribute records
 echo -e "${BLUE}Detecting modified or new files...${RESET}"
 detect_modified_files() {
-  # Get list of all files in the directory (excluding our metadata files)
+  echo -e "${BLUE}Analyzing files...${RESET}"
+  spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
+  spin=0
+  
+  # Get list of all files in the directory (excluding metadata files)
   find "$EXTRACT_DIR" -type f -not -path "$EXTRACT_DIR/fs-config.txt" \
     -not -path "$EXTRACT_DIR/file_contexts.txt" \
     -not -path "$EXTRACT_DIR/symlinks.txt" \
-    -printf "%P\n" | sort > /tmp/all_files.txt
+    -printf "%P\n" | sort > /tmp/all_files.txt &
+    
+  while kill -0 $! 2>/dev/null; do
+    echo -ne "\r${BLUE}[${spinner[$((spin++))]}] Scanning files${RESET}"
+    spin=$((spin % 10))
+    sleep 0.1
+  done
   
-  # Get list of files in fs-config.txt
+  total_files=$(wc -l < /tmp/all_files.txt)
+  echo -e "\r${GREEN}[✓] Found ${total_files} files to process${RESET}"
+  
   if [ -f "$FS_CONFIG_FILE" ]; then
     grep -v "^#" "$FS_CONFIG_FILE" | awk '{print $1}' | sort > /tmp/config_files.txt
-    # Find files not in config
     comm -23 /tmp/all_files.txt /tmp/config_files.txt > /tmp/new_files.txt
-    
-    # Also find all directories
     find "$EXTRACT_DIR" -type d -not -path "$EXTRACT_DIR" -printf "%P\n" | sort > /tmp/all_dirs.txt
     grep -v "^#" "$FS_CONFIG_FILE" | grep -v " 0 0 644 " | awk '{print $1}' | sort > /tmp/special_paths.txt
     comm -23 /tmp/all_dirs.txt /tmp/special_paths.txt > /tmp/new_dirs.txt
@@ -96,8 +105,12 @@ detect_modified_files() {
     find "$EXTRACT_DIR" -type d -not -path "$EXTRACT_DIR" -printf "%P\n" > /tmp/new_dirs.txt
   fi
   
-  echo -e "${BLUE}Found $(wc -l < /tmp/new_files.txt) new/modified files${RESET}"
-  echo -e "${BLUE}Found $(wc -l < /tmp/new_dirs.txt) new/modified directories${RESET}"
+  new_files=$(wc -l < /tmp/new_files.txt)
+  new_dirs=$(wc -l < /tmp/new_dirs.txt)
+  
+  if [ $new_files -gt 0 ] || [ $new_dirs -gt 0 ]; then
+    echo -e "${BLUE}Found ${new_files} new files and ${new_dirs} new directories${RESET}"
+  fi
 }
 
 # Default SELinux contexts for common Android paths
@@ -333,120 +346,98 @@ apply_attributes() {
 
 # Apply attributes to existing files from config
 restore_attributes() {
+  echo -e "${BLUE}Preparing for attribute restoration...${RESET}"
+  chown -R root:root "$EXTRACT_DIR"
+  
   if [ ! -f "$FS_CONFIG_FILE" ]; then
     echo -e "${YELLOW}No fs-config file found, skipping attribute restoration.${RESET}"
     return
   fi
   
-  echo -e "${BLUE}Restoring attributes to existing files...${RESET}"
-  local total_items=$(grep -v "^#" "$FS_CONFIG_FILE" | wc -l)
-  local processed=0
-  local last_percent=0
+  total_items=$(grep -v "^#" "$FS_CONFIG_FILE" | wc -l)
+  spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
+  spin=0
+  processed=0
   
-  # Process directories first (helps with inheritance)
-  grep -v "^#" "$FS_CONFIG_FILE" | grep " 755 " | while read -r line; do
+  echo -e "${BLUE}Restoring file attributes...${RESET}"
+  
+  # Process all entries with progress spinner
+  grep -v "^#" "$FS_CONFIG_FILE" | while read -r line; do
+    processed=$((processed + 1))
+    percentage=$((processed * 100 / total_items))
+    
     file=$(echo "$line" | awk '{print $1}')
     uid=$(echo "$line" | awk '{print $2}')
     gid=$(echo "$line" | awk '{print $3}')
     mode=$(echo "$line" | awk '{print $4}')
     
-    if [ -d "$EXTRACT_DIR/$file" ]; then
-      # Apply attributes silently
-      chown "$uid:$gid" "$EXTRACT_DIR/$file" 2>/dev/null || true
-      chmod "$mode" "$EXTRACT_DIR/$file" 2>/dev/null || true
+    if [ -e "$EXTRACT_DIR/$file" ]; then
+      chown "$uid:$gid" "$EXTRACT_DIR/$file" 2>/dev/null
+      chmod "$mode" "$EXTRACT_DIR/$file" 2>/dev/null
     fi
     
-    # Update progress indicator
-    processed=$((processed + 1))
-    percent=$((processed * 100 / total_items))
-    if [ $percent -ne $last_percent ] && [ $((percent % 10)) -eq 0 ]; then
-      echo -ne "${BLUE}Progress: $percent%\r${RESET}"
-      last_percent=$percent
+    # Update progress every 100 items
+    if [ $((processed % 100)) -eq 0 ]; then
+      echo -ne "\r${BLUE}[${spinner[$((spin++))]}] Progress: ${percentage}% (${processed}/${total_items})${RESET}"
+      spin=$((spin % 10))
     fi
   done
+  echo -e "\r${GREEN}[✓] Attributes restored successfully${RESET}"
   
-  # Then process files
-  grep -v "^#" "$FS_CONFIG_FILE" | grep -v " 755 " | while read -r line; do
-    file=$(echo "$line" | awk '{print $1}')
-    uid=$(echo "$line" | awk '{print $2}')
-    gid=$(echo "$line" | awk '{print $3}')
-    mode=$(echo "$line" | awk '{print $4}')
-    
-    if [ -f "$EXTRACT_DIR/$file" ]; then
-      chown "$uid:$gid" "$EXTRACT_DIR/$file" 2>/dev/null || true
-      chmod "$mode" "$EXTRACT_DIR/$file" 2>/dev/null || true
-    fi
-    
-    # Update progress indicator
-    processed=$((processed + 1))
-    percent=$((processed * 100 / total_items))
-    if [ $percent -ne $last_percent ] && [ $((percent % 10)) -eq 0 ]; then
-      echo -ne "${BLUE}Progress: $percent%\r${RESET}"
-      last_percent=$percent
-    fi
-  done
-  echo -e "${BLUE}Progress: 100%  ${RESET}"
-  
-  # Apply SELinux contexts if available
+  # SELinux contexts restoration with progress
   if [ -f "$FILE_CONTEXTS_FILE" ] && command -v chcon &> /dev/null; then
     echo -e "${BLUE}Restoring SELinux contexts...${RESET}"
-    local total_contexts=$(grep -v "^#" "$FILE_CONTEXTS_FILE" | wc -l)
+    total_contexts=$(grep -v "^#" "$FILE_CONTEXTS_FILE" | wc -l)
     processed=0
-    last_percent=0
+    spin=0
     
-    # Process all files/directories with contexts
     grep -v "^#" "$FILE_CONTEXTS_FILE" | while read -r line; do
+      processed=$((processed + 1))
+      percentage=$((processed * 100 / total_contexts))
+      
       file=$(echo "$line" | awk '{print $1}')
       context=$(echo "$line" | cut -d' ' -f2-)
       
       if [ -e "$EXTRACT_DIR/$file" ] || [ -L "$EXTRACT_DIR/$file" ]; then
-        chcon "$context" "$EXTRACT_DIR/$file" 2>/dev/null || true
+        chcon "$context" "$EXTRACT_DIR/$file" 2>/dev/null
       fi
       
-      # Update progress indicator
-      processed=$((processed + 1))
-      percent=$((processed * 100 / total_contexts))
-      if [ $percent -ne $last_percent ] && [ $((percent % 10)) -eq 0 ]; then
-        echo -ne "${BLUE}SELinux Progress: $percent%\r${RESET}"
-        last_percent=$percent
+      if [ $((processed % 100)) -eq 0 ]; then
+        echo -ne "\r${BLUE}[${spinner[$((spin++))]}] SELinux: ${percentage}% (${processed}/${total_contexts})${RESET}"
+        spin=$((spin % 10))
       fi
     done
-    echo -e "${BLUE}SELinux Progress: 100%  ${RESET}"
+    echo -e "\r${GREEN}[✓] SELinux contexts restored${RESET}"
   fi
   
-  # Restore symbolic links if available
+  # Symlinks restoration with progress
   if [ -f "$SYMLINKS_FILE" ]; then
-    echo -e "${BLUE}Restoring symbolic links...${RESET}"
-    local total_links=$(grep -v "^#" "$SYMLINKS_FILE" | grep " -> " | wc -l)
-    local links_processed=0
+    echo -e "${BLUE}Restoring symlinks...${RESET}"
+    total_links=$(grep -v "^#" "$SYMLINKS_FILE" | grep " -> " | wc -l)
+    processed=0
+    spin=0
     
     grep -v "^#" "$SYMLINKS_FILE" | grep " -> " | while read -r line; do
+      processed=$((processed + 1))
+      percentage=$((processed * 100 / total_links))
+      
       link_path=$(echo "$line" | awk -F " -> " '{print $1}')
       link_target=$(echo "$line" | awk -F " -> " '{print $2}')
       
-      # Remove existing file/link if exists
-      if [ -e "$EXTRACT_DIR/$link_path" ] || [ -L "$EXTRACT_DIR/$link_path" ]; then
-        rm -f "$EXTRACT_DIR/$link_path"
-      fi
-      
-      # Create directory structure if needed
-      mkdir -p "$(dirname "$EXTRACT_DIR/$link_path")"
-      
-      # Create the symlink silently
+      mkdir -p "$(dirname "$EXTRACT_DIR/$link_path")" 2>/dev/null
+      rm -f "$EXTRACT_DIR/$link_path" 2>/dev/null
       ln -sf "$link_target" "$EXTRACT_DIR/$link_path"
       
-      # Update counter and show progress for large number of links
-      links_processed=$((links_processed + 1))
-      if [ $total_links -gt 100 ] && [ $((links_processed % 100)) -eq 0 ]; then
-        echo -ne "${BLUE}Symlinks: $links_processed/$total_links\r${RESET}"
+      # Only show progress for larger numbers of symlinks
+      if [ $total_links -gt 100 ] && [ $((processed % 50)) -eq 0 ]; then
+        echo -ne "\r${BLUE}[${spinner[$((spin++))]}] Symlinks: ${percentage}% (${processed}/${total_links})${RESET}"
+        spin=$((spin % 10))
       fi
     done
     
-    if [ $total_links -gt 100 ]; then
-      echo -e "${BLUE}Symlinks: $total_links/$total_links  ${RESET}"
-    else
-      echo -e "${BLUE}Restored $total_links symlinks${RESET}"
-    fi
+    # Clear the progress line before showing completion
+    echo -ne "\r${BLUE}[${spinner[$((spin % 10))]}] Symlinks: 100% (${total_links}/${total_links})${RESET}"
+    echo -e "\n${GREEN}[✓] Restored ${total_links} symlinks${RESET}"
   fi
 }
 
@@ -515,6 +506,12 @@ eval $MKFS_CMD
 if [ $? -eq 0 ]; then
   echo -e "\n${GREEN}${BOLD}Successfully created EROFS image: $OUTPUT_IMG${RESET}"
   echo -e "${BLUE}Image size: $(du -h "$OUTPUT_IMG" | cut -f1)${RESET}"
+  
+  # Transfer ownership back to actual user
+  if [ -n "$SUDO_USER" ]; then
+    chown -R "$SUDO_USER:$SUDO_USER" "$EXTRACT_DIR"
+    chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"
+  fi
 else
   echo -e "\n${RED}Error occurred during image creation.${RESET}"
   exit 1

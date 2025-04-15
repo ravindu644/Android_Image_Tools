@@ -130,76 +130,73 @@ else
   echo -e "${GREEN}Successfully mounted original image.${RESET}"
 fi
 
-# Extract SELinux contexts
-echo -e "\n${BLUE}Extracting file contexts...${RESET}"
-echo "# File contexts extracted from $IMAGE_FILE on $(date)" > "$FILE_CONTEXTS_FILE"
-echo "# Format: <path> <user>:<role>:<type>:<range>" >> "$FILE_CONTEXTS_FILE"
-
-# Extract FS config info (ownership and permissions)
-echo -e "${BLUE}Extracting file ownership and permissions...${RESET}"
-echo "# FS config extracted from $IMAGE_FILE on $(date)" > "$FS_CONFIG_FILE"
-echo "# Format: <path> <uid> <gid> <mode> capabilities=<cap>" >> "$FS_CONFIG_FILE"
-
 # Copy files with preservation of permissions
-echo -e "\nExtracting files with preserved attributes..."
+echo -e "\n${BLUE}Extracting files from image...${RESET}"
 echo -e "This may take some time depending on the size of the image...\n"
 
-# First copy all the files
-(cd "$MOUNT_DIR" && tar --preserve-permissions -cf - .) | (cd "$EXTRACT_DIR" && tar -xf -)
+# Count total files for progress
+total_files=$(find "$MOUNT_DIR" -type f,d,l | wc -l)
+current=0
 
-# Extract SELinux contexts - using a better approach for selinux
-echo -e "${BLUE}Extracting SELinux contexts...${RESET}"
-if command -v ls &> /dev/null; then
-  # We'll use find to get all files and then ls -Z to get their contexts
-  find "$MOUNT_DIR" -type f -o -type d -o -type b -o -type c | while read -r item; do
-    if [ -e "$item" ]; then
-      # Get relative path
-      rel_path=${item#$MOUNT_DIR/}
-      if [ -z "$rel_path" ]; then
-        rel_path="/"
-      fi
-      
-      # Get SELinux context using ls -Z
-      context=$(ls -dZ "$item" 2>/dev/null | awk '{print $1}')
-      
-      if [ -n "$context" ] && [ "$context" != "?" ]; then
-        echo "$rel_path $context" >> "$FILE_CONTEXTS_FILE"
-      fi
-    fi
-  done
-fi
+# Use tar with progress through a pipeline
+(cd "$MOUNT_DIR" && tar --preserve-permissions -cf - .) | \
+(cd "$EXTRACT_DIR" && tar -xf -) & 
 
-# Extract ownership and permissions
-echo -e "${BLUE}Extracting ownership and permissions...${RESET}"
-find "$MOUNT_DIR" -type f -o -type d -o -type b -o -type c | while read -r item; do
-  if [ -e "$item" ]; then
+# Show spinner while tar is running
+spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
+spin=0
+while kill -0 $! 2>/dev/null; do
+  current_files=$(find "$EXTRACT_DIR" -type f,d,l 2>/dev/null | wc -l)
+  percentage=$((current_files * 100 / total_files))
+  echo -ne "\r${BLUE}[${spinner[$((spin++))]}] Progress: ${percentage}% (${current_files}/${total_files} files)${RESET}"
+  spin=$((spin % 10))
+  sleep 0.1
+done
+echo -e "\r${GREEN}[✓] Extraction complete: ${total_files} files copied      ${RESET}\n"
+
+# Extract metadata (contexts, permissions, symlinks) with progress
+echo -e "${BLUE}Extracting file metadata...${RESET}"
+
+# Extract SELinux contexts and permissions in a single pass
+echo "# File contexts extracted from $IMAGE_FILE on $(date)" > "$FILE_CONTEXTS_FILE"
+echo "# FS config extracted from $IMAGE_FILE on $(date)" > "$FS_CONFIG_FILE"
+echo "# Symlinks extracted from $IMAGE_FILE on $(date)" > "${EXTRACT_DIR}/symlinks.txt"
+
+total_items=$(find "$MOUNT_DIR" | wc -l)
+current=0
+
+find "$MOUNT_DIR" \( -type f -o -type d -o -type b -o -type c -o -type l \) | while read -r item; do
+  current=$((current + 1))
+  percentage=$((current * 100 / total_items))
+  
+  # Show progress every 100 items
+  if [ $((current % 100)) -eq 0 ]; then
+    echo -ne "\r${BLUE}Processing: ${percentage}% (${current}/${total_items})${RESET}"
+  fi
+  
+  if [ -e "$item" ] || [ -L "$item" ]; then
     # Get relative path
     rel_path=${item#$MOUNT_DIR/}
-    if [ -z "$rel_path" ]; then
-      rel_path="/"
-    fi
+    [ -z "$rel_path" ] && rel_path="/"
     
-    # Get file stats
-    stats=$(stat -c "%u %g %a" "$item" 2>/dev/null)
-    if [ -n "$stats" ]; then
-      uid=$(echo "$stats" | cut -d' ' -f1)
-      gid=$(echo "$stats" | cut -d' ' -f2)
-      mode=$(echo "$stats" | cut -d' ' -f3)
-      echo "$rel_path $uid $gid $mode capabilities=0x0" >> "$FS_CONFIG_FILE"
+    if [ -L "$item" ]; then
+      # Handle symlink
+      target=$(readlink "$item")
+      echo "$rel_path -> $target" >> "${EXTRACT_DIR}/symlinks.txt"
+    else
+      # Get SELinux context
+      context=$(ls -dZ "$item" 2>/dev/null | awk '{print $1}')
+      [ -n "$context" ] && [ "$context" != "?" ] && \
+        echo "$rel_path $context" >> "$FILE_CONTEXTS_FILE"
+      
+      # Get permissions
+      stats=$(stat -c "%u %g %a" "$item" 2>/dev/null)
+      [ -n "$stats" ] && \
+        echo "$rel_path $stats capabilities=0x0" >> "$FS_CONFIG_FILE"
     fi
   fi
 done
-
-# Special handling for symlinks
-echo -e "${BLUE}Processing symlinks...${RESET}"
-echo "# Symlinks extracted from $IMAGE_FILE on $(date)" > "${EXTRACT_DIR}/symlinks.txt"
-echo "# Format: <path> -> <target>" >> "${EXTRACT_DIR}/symlinks.txt"
-
-find "$MOUNT_DIR" -type l | while read -r link; do
-  rel_path=${link#$MOUNT_DIR/}
-  target=$(readlink "$link")
-  echo "$rel_path -> $target" >> "${EXTRACT_DIR}/symlinks.txt"
-done
+echo -e "\r${GREEN}[✓] Metadata extraction complete                ${RESET}\n"
 
 # Verify extraction
 if [ $? -eq 0 ]; then
@@ -207,6 +204,11 @@ if [ $? -eq 0 ]; then
   echo -e "${BOLD}Files extracted to: ${EXTRACT_DIR}${RESET}"
   echo -e "${BOLD}File contexts saved to: ${FILE_CONTEXTS_FILE}${RESET}"
   echo -e "${BOLD}FS config saved to: ${FS_CONFIG_FILE}${RESET}\n"
+
+  # Transfer ownership to actual user
+  if [ -n "$SUDO_USER" ]; then
+    chown -R "$SUDO_USER:$SUDO_USER" "$EXTRACT_DIR"
+  fi
 else
   echo -e "${RED}Error occurred during extraction.${RESET}"
   exit 1
