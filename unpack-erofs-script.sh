@@ -130,73 +130,74 @@ else
   echo -e "${GREEN}Successfully mounted original image.${RESET}"
 fi
 
-# Copy files with preservation of permissions
-echo -e "\n${BLUE}Extracting files from image...${RESET}"
-echo -e "This may take some time depending on the size of the image...\n"
+# First get root directory context specifically
+echo -e "${BLUE}Capturing root directory attributes...${RESET}"
+ROOT_CONTEXT=$(ls -dZ "$MOUNT_DIR" | awk '{print $1}')
+ROOT_STATS=$(stat -c "%u %g %a" "$MOUNT_DIR")
 
-# Count total files for progress
-total_files=$(find "$MOUNT_DIR" -type f,d,l | wc -l)
-current=0
+# Create config files with root attributes first
+echo "# FS config extracted from $IMAGE_FILE on $(date)" > "$FS_CONFIG_FILE"
+echo "/ $ROOT_STATS capabilities=0x0" >> "$FS_CONFIG_FILE"
 
-# Use tar with progress through a pipeline
-(cd "$MOUNT_DIR" && tar --preserve-permissions -cf - .) | \
-(cd "$EXTRACT_DIR" && tar -xf -) & 
+echo "# File contexts extracted from $IMAGE_FILE on $(date)" > "$FILE_CONTEXTS_FILE"
+echo "/ $ROOT_CONTEXT" >> "$FILE_CONTEXTS_FILE"
 
-# Show spinner while tar is running
+# Extract metadata with progress
+echo -e "${BLUE}Extracting file attributes...${RESET}"
+total_items=$(find "$MOUNT_DIR" -mindepth 1 | wc -l)
+processed=0
 spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
 spin=0
-while kill -0 $! 2>/dev/null; do
-  current_files=$(find "$EXTRACT_DIR" -type f,d,l 2>/dev/null | wc -l)
-  percentage=$((current_files * 100 / total_files))
-  echo -ne "\r${BLUE}[${spinner[$((spin++))]}] Progress: ${percentage}% (${current_files}/${total_files} files)${RESET}"
-  spin=$((spin % 10))
-  sleep 0.1
-done
-echo -e "\r${GREEN}[✓] Extraction complete: ${total_files} files copied      ${RESET}\n"
 
-# Extract metadata (contexts, permissions, symlinks) with progress
-echo -e "${BLUE}Extracting file metadata...${RESET}"
-
-# Extract SELinux contexts and permissions in a single pass
-echo "# File contexts extracted from $IMAGE_FILE on $(date)" > "$FILE_CONTEXTS_FILE"
-echo "# FS config extracted from $IMAGE_FILE on $(date)" > "$FS_CONFIG_FILE"
-echo "# Symlinks extracted from $IMAGE_FILE on $(date)" > "${EXTRACT_DIR}/symlinks.txt"
-
-total_items=$(find "$MOUNT_DIR" | wc -l)
-current=0
-
-find "$MOUNT_DIR" \( -type f -o -type d -o -type b -o -type c -o -type l \) | while read -r item; do
-  current=$((current + 1))
-  percentage=$((current * 100 / total_items))
-  
-  # Show progress every 100 items
-  if [ $((current % 100)) -eq 0 ]; then
-    echo -ne "\r${BLUE}Processing: ${percentage}% (${current}/${total_items})${RESET}"
-  fi
-  
-  if [ -e "$item" ] || [ -L "$item" ]; then
-    # Get relative path
-    rel_path=${item#$MOUNT_DIR/}
-    [ -z "$rel_path" ] && rel_path="/"
+find "$MOUNT_DIR" -mindepth 1 | while read -r item; do
+    processed=$((processed + 1))
+    percentage=$((processed * 100 / total_items))
     
-    if [ -L "$item" ]; then
-      # Handle symlink
-      target=$(readlink "$item")
-      echo "$rel_path -> $target" >> "${EXTRACT_DIR}/symlinks.txt"
-    else
-      # Get SELinux context
-      context=$(ls -dZ "$item" 2>/dev/null | awk '{print $1}')
-      [ -n "$context" ] && [ "$context" != "?" ] && \
-        echo "$rel_path $context" >> "$FILE_CONTEXTS_FILE"
-      
-      # Get permissions
-      stats=$(stat -c "%u %g %a" "$item" 2>/dev/null)
-      [ -n "$stats" ] && \
-        echo "$rel_path $stats capabilities=0x0" >> "$FS_CONFIG_FILE"
+    if [ $((processed % 50)) -eq 0 ]; then
+        echo -ne "\r${BLUE}[${spinner[$((spin++))]}] Processing: ${percentage}% (${processed}/${total_items})${RESET}"
+        spin=$((spin % 10))
     fi
-  fi
+    
+    rel_path=${item#$MOUNT_DIR}
+    
+    # Get attributes and context
+    stats=$(stat -c "%u %g %a" "$item" 2>/dev/null)
+    context=$(ls -dZ "$item" 2>/dev/null | awk '{print $1}')
+    
+    [ -n "$stats" ] && echo "$rel_path $stats capabilities=0x0" >> "$FS_CONFIG_FILE"
+    [ -n "$context" ] && [ "$context" != "?" ] && echo "$rel_path $context" >> "$FILE_CONTEXTS_FILE"
 done
-echo -e "\r${GREEN}[✓] Metadata extraction complete                ${RESET}\n"
+echo -e "\r${GREEN}[✓] Attributes extracted successfully${RESET}\n"
+
+# Now copy all files with preserved SELinux contexts
+echo -e "${BLUE}Copying files from image...${RESET}"
+
+total_size=$(du -sb "$MOUNT_DIR" | cut -f1)
+total_hr=$(numfmt --to=iec-i --suffix=B "$total_size")
+spin=0
+
+# Use tar with progress through pv if available
+if command -v pv >/dev/null 2>&1; then
+  (cd "$MOUNT_DIR" && tar --selinux -cf - .) | pv -s "$total_size" | (cd "$EXTRACT_DIR" && tar --selinux -xf -)
+else
+  # Custom progress for tar without pv
+  (cd "$MOUNT_DIR" && tar --selinux -cf - .) | (cd "$EXTRACT_DIR" && tar --selinux -xf -) &
+  
+  while kill -0 $! 2>/dev/null; do
+    current_size=$(du -sb "$EXTRACT_DIR" | cut -f1)
+    current_hr=$(numfmt --to=iec-i --suffix=B "$current_size")
+    percentage=$((current_size * 100 / total_size))
+    echo -ne "\r${BLUE}[${spinner[$((spin++))]}] Copying files: ${percentage}% (${current_hr}/${total_hr})${RESET}"
+    spin=$((spin % 10))
+    sleep 0.1
+  done
+  echo -ne "\r${BLUE}$(printf '%*s' "100" '')${RESET}\r"  # Clear the progress line
+fi
+
+echo -e "\n${GREEN}[✓] Files copied successfully${RESET}"
+
+# Store timestamp for tracking modifications
+touch "${EXTRACT_DIR}/.unpack_timestamp"
 
 # Verify extraction
 if [ $? -eq 0 ]; then

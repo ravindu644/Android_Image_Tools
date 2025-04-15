@@ -72,378 +72,72 @@ if [ ! -f "$FILE_CONTEXTS_FILE" ]; then
   echo -e "${YELLOW}SELinux contexts will not be applied.${RESET}"
 fi
 
-# Find modified or new files compared to the attribute records
-echo -e "${BLUE}Detecting modified or new files...${RESET}"
-detect_modified_files() {
-  echo -e "${BLUE}Analyzing files...${RESET}"
-  spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
-  spin=0
-  
-  # Get list of all files in the directory (excluding metadata files)
-  find "$EXTRACT_DIR" -type f -not -path "$EXTRACT_DIR/fs-config.txt" \
-    -not -path "$EXTRACT_DIR/file_contexts.txt" \
-    -not -path "$EXTRACT_DIR/symlinks.txt" \
-    -printf "%P\n" | sort > /tmp/all_files.txt &
-    
-  while kill -0 $! 2>/dev/null; do
-    echo -ne "\r${BLUE}[${spinner[$((spin++))]}] Scanning files${RESET}"
-    spin=$((spin % 10))
-    sleep 0.1
-  done
-  
-  total_files=$(wc -l < /tmp/all_files.txt)
-  echo -e "\r${GREEN}[✓] Found ${total_files} files to process${RESET}"
-  
-  if [ -f "$FS_CONFIG_FILE" ]; then
-    grep -v "^#" "$FS_CONFIG_FILE" | awk '{print $1}' | sort > /tmp/config_files.txt
-    comm -23 /tmp/all_files.txt /tmp/config_files.txt > /tmp/new_files.txt
-    find "$EXTRACT_DIR" -type d -not -path "$EXTRACT_DIR" -printf "%P\n" | sort > /tmp/all_dirs.txt
-    grep -v "^#" "$FS_CONFIG_FILE" | grep -v " 0 0 644 " | awk '{print $1}' | sort > /tmp/special_paths.txt
-    comm -23 /tmp/all_dirs.txt /tmp/special_paths.txt > /tmp/new_dirs.txt
-  else
-    cp /tmp/all_files.txt /tmp/new_files.txt
-    find "$EXTRACT_DIR" -type d -not -path "$EXTRACT_DIR" -printf "%P\n" > /tmp/new_dirs.txt
-  fi
-  
-  new_files=$(wc -l < /tmp/new_files.txt)
-  new_dirs=$(wc -l < /tmp/new_dirs.txt)
-  
-  if [ $new_files -gt 0 ] || [ $new_dirs -gt 0 ]; then
-    echo -e "${BLUE}Found ${new_files} new files and ${new_dirs} new directories${RESET}"
-  fi
-}
-
-# Default SELinux contexts for common Android paths
-apply_android_defaults() {
-  local path="$1"
-  
-  # Set a proper default context
-  local default_context=""
-  local default_perm="644"
-  local default_uid="0"
-  local default_gid="0"
-  local is_dir=false
-  
-  if [ -d "$EXTRACT_DIR/$path" ]; then
-    is_dir=true
-    default_perm="755"
-  fi
-  
-  # Android-specific path handling
-  case "$path" in
-    app/*|priv-app/*)
-      if [[ "$path" == *".apk" ]]; then
-        default_context="u:object_r:system_file:s0"
-      elif [[ "$path" == *"/" ]] || $is_dir; then
-        default_context="u:object_r:system_file:s0"
-      fi
-      ;;
-    bin/*|xbin/*)
-      default_context="u:object_r:system_file:s0"
-      ;;
-    etc/*)
-      default_context="u:object_r:system_file:s0"
-      ;;
-    lib/*|lib64/*)
-      default_context="u:object_r:system_file:s0"
-      ;;
-    vendor/*)
-      default_context="u:object_r:vendor_file:s0"
-      ;;
-    *)
-      default_context="u:object_r:system_file:s0"
-      ;;
-  esac
-  
-  # Always ensure we have a default context
-  if [ -z "$default_context" ]; then
-    default_context="u:object_r:system_file:s0"
-  fi
-  
-  echo "$default_context $default_uid $default_gid $default_perm"
-}
-
-# Apply attributes to new files based on similar files in the same directory
-apply_attributes() {
-  if [ ! -s "/tmp/new_files.txt" ] && [ ! -s "/tmp/new_dirs.txt" ]; then
-    echo -e "${GREEN}No new files or directories to process.${RESET}"
-    return
-  fi
-  
-  echo -e "${BLUE}Applying attributes to new files and directories...${RESET}"
-  
-  # Process directories first (parent before child)
-  if [ -s "/tmp/new_dirs.txt" ]; then
-    # Sort directories by depth (process parents first)
-    sort -t/ -k1,1 /tmp/new_dirs.txt > /tmp/new_dirs_sorted.txt
-    
-    while read -r dir; do
-      # Skip if empty
-      [ -z "$dir" ] && continue
-      
-      # Find a parent directory
-      parent=$(dirname "$dir")
-      if [ "$parent" = "." ]; then
-        parent_attrs=""
-      else
-        parent_attrs=$(grep "^$parent " "$FS_CONFIG_FILE" 2>/dev/null | head -1)
-      fi
-      
-      # Find a sibling directory
-      sibling_dir=$(grep "^${parent}/[^/]*$" "$FS_CONFIG_FILE" 2>/dev/null | grep " 755 " | head -1 | awk '{print $1}')
-      sibling_attrs=""
-      if [ -n "$sibling_dir" ]; then
-        sibling_attrs=$(grep "^$sibling_dir " "$FS_CONFIG_FILE" 2>/dev/null | head -1)
-      fi
-      
-      # If we found parent or sibling attributes, use them
-      if [ -n "$parent_attrs" ]; then
-        uid=$(echo "$parent_attrs" | awk '{print $2}')
-        gid=$(echo "$parent_attrs" | awk '{print $3}')
-        mode="755"  # Default mode for directories
-      elif [ -n "$sibling_attrs" ]; then
-        uid=$(echo "$sibling_attrs" | awk '{print $2}')
-        gid=$(echo "$sibling_attrs" | awk '{print $3}')
-        mode="755"  # Default mode for directories
-      else
-        # Use Android defaults
-        defaults=$(apply_android_defaults "$dir")
-        context=$(echo "$defaults" | cut -d' ' -f1)
-        uid=$(echo "$defaults" | cut -d' ' -f2)
-        gid=$(echo "$defaults" | cut -d' ' -f3)
-        mode=$(echo "$defaults" | cut -d' ' -f4)
-      fi
-      
-      # Apply ownership and permissions
-      echo -e "${BLUE}Setting directory $dir to $uid:$gid mode $mode${RESET}"
-      chown "$uid:$gid" "$EXTRACT_DIR/$dir"
-      chmod "$mode" "$EXTRACT_DIR/$dir"
-      
-      # Add to fs-config
-      echo "$dir $uid $gid $mode capabilities=0x0" >> "$FS_CONFIG_FILE"
-      
-      # Get SELinux context
-      if [ -f "$FILE_CONTEXTS_FILE" ]; then
-        # Try to find context for parent or sibling directory
-        if [ -n "$parent" ] && [ "$parent" != "." ]; then
-          parent_context=$(grep "^$parent " "$FILE_CONTEXTS_FILE" 2>/dev/null | head -1 | awk '{print $2}')
-        fi
-        
-        if [ -n "$sibling_dir" ]; then
-          sibling_context=$(grep "^$sibling_dir " "$FILE_CONTEXTS_FILE" 2>/dev/null | head -1 | awk '{print $2}')
-        fi
-        
-        # Use parent context, or sibling context, or default
-        if [ -n "$parent_context" ]; then
-          context="$parent_context"
-        elif [ -n "$sibling_context" ]; then
-          context="$sibling_context"
-        else
-          defaults=$(apply_android_defaults "$dir")
-          context=$(echo "$defaults" | cut -d' ' -f1)
-        fi
-        
-        # Apply SELinux context
-        echo -e "${BLUE}Setting directory $dir context to $context${RESET}"
-        if command -v chcon &> /dev/null; then
-          chcon "$context" "$EXTRACT_DIR/$dir" 2>/dev/null || true
-        fi
-        
-        # Add to file_contexts
-        echo "$dir $context" >> "$FILE_CONTEXTS_FILE"
-      fi
-    done < /tmp/new_dirs_sorted.txt
-  fi
-  
-  # Now process files
-  if [ -s "/tmp/new_files.txt" ]; then
-    while read -r file; do
-      # Skip if empty
-      [ -z "$file" ] && continue
-      
-      dir=$(dirname "$file")
-      basename=$(basename "$file")
-      
-      # Find files with same extension in the same directory
-      file_ext="${basename##*.}"
-      if [ "$file_ext" != "$basename" ]; then
-        similar_file=$(grep "^$dir/[^/]*\\.$file_ext$" "$FS_CONFIG_FILE" 2>/dev/null | head -1 | awk '{print $1}')
-      else
-        similar_file=""
-      fi
-      
-      if [ -n "$similar_file" ]; then
-        # Get attributes from similar file
-        similar_attrs=$(grep "^$similar_file " "$FS_CONFIG_FILE" 2>/dev/null | head -1)
-        uid=$(echo "$similar_attrs" | awk '{print $2}')
-        gid=$(echo "$similar_attrs" | awk '{print $3}')
-        mode=$(echo "$similar_attrs" | awk '{print $4}')
-      else
-        # Try to get directory attributes
-        dir_attrs=$(grep "^$dir$" "$FS_CONFIG_FILE" 2>/dev/null | head -1)
-        if [ -n "$dir_attrs" ]; then
-          uid=$(echo "$dir_attrs" | awk '{print $2}')
-          gid=$(echo "$dir_attrs" | awk '{print $3}')
-          # Files usually 644, executables 755
-          if [[ "$basename" == *.sh || "$basename" == *.bin || -x "$EXTRACT_DIR/$file" ]]; then
-            mode="755"
-          else
-            mode="644"
-          fi
-        else
-          # Use Android defaults
-          defaults=$(apply_android_defaults "$file")
-          context=$(echo "$defaults" | cut -d' ' -f1)
-          uid=$(echo "$defaults" | cut -d' ' -f2)
-          gid=$(echo "$defaults" | cut -d' ' -f3)
-          mode=$(echo "$defaults" | cut -d' ' -f4)
-        fi
-      fi
-      
-      # Apply ownership and permissions
-      echo -e "${BLUE}Setting file $file to $uid:$gid mode $mode${RESET}"
-      chown "$uid:$gid" "$EXTRACT_DIR/$file"
-      chmod "$mode" "$EXTRACT_DIR/$file"
-      
-      # Add to fs-config
-      echo "$file $uid $gid $mode capabilities=0x0" >> "$FS_CONFIG_FILE"
-      
-      # Handle SELinux context
-      if [ -f "$FILE_CONTEXTS_FILE" ]; then
-        context=""
-        if [ -n "$similar_file" ]; then
-          similar_context=$(grep "^$similar_file " "$FILE_CONTEXTS_FILE" 2>/dev/null | head -1 | awk '{print $2}')
-          [ -n "$similar_context" ] && context="$similar_context"
-        fi
-        
-        if [ -z "$context" ] && [ -n "$dir" ] && [ "$dir" != "." ]; then
-          dir_context=$(grep "^$dir " "$FILE_CONTEXTS_FILE" 2>/dev/null | head -1 | awk '{print $2}')
-          [ -n "$dir_context" ] && context="$dir_context"
-        fi
-        
-        if [ -z "$context" ]; then
-          defaults=$(apply_android_defaults "$file")
-          context=$(echo "$defaults" | cut -d' ' -f1)
-        fi
-        
-        # Ensure we have a context
-        if [ -z "$context" ]; then
-          context="u:object_r:system_file:s0"
-        fi
-        
-        # Apply SELinux context
-        echo -e "${BLUE}Setting file $file context to $context${RESET}"
-        if command -v chcon &> /dev/null; then
-          chcon "$context" "$EXTRACT_DIR/$file" 2>/dev/null || true
-        fi
-        
-        # Add to file_contexts
-        echo "$file $context" >> "$FILE_CONTEXTS_FILE"
-      fi
-    done < /tmp/new_files.txt
-  fi
-}
-
-# Apply attributes to existing files from config
 restore_attributes() {
-  echo -e "${BLUE}Preparing for attribute restoration...${RESET}"
-  chown -R root:root "$EXTRACT_DIR"
-  
-  if [ ! -f "$FS_CONFIG_FILE" ]; then
-    echo -e "${YELLOW}No fs-config file found, skipping attribute restoration.${RESET}"
-    return
-  fi
-  
-  total_items=$(grep -v "^#" "$FS_CONFIG_FILE" | wc -l)
-  spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
-  spin=0
-  processed=0
-  
-  echo -e "${BLUE}Restoring file attributes...${RESET}"
-  
-  # Process all entries with progress spinner
-  grep -v "^#" "$FS_CONFIG_FILE" | while read -r line; do
-    processed=$((processed + 1))
-    percentage=$((processed * 100 / total_items))
+    echo -e "\n${BLUE}Initializing permission restoration...${RESET}"
+    echo -e "${BLUE}┌─ Analyzing filesystem structure...${RESET}"
     
-    file=$(echo "$line" | awk '{print $1}')
-    uid=$(echo "$line" | awk '{print $2}')
-    gid=$(echo "$line" | awk '{print $3}')
-    mode=$(echo "$line" | awk '{print $4}')
+    # Count dirs and files
+    DIR_COUNT=$(find "$EXTRACT_DIR" -type d | wc -l)
+    FILE_COUNT=$(find "$EXTRACT_DIR" -type f | wc -l)
     
-    if [ -e "$EXTRACT_DIR/$file" ]; then
-      chown "$uid:$gid" "$EXTRACT_DIR/$file" 2>/dev/null
-      chmod "$mode" "$EXTRACT_DIR/$file" 2>/dev/null
+    echo -e "${BLUE}├─ Found ${BOLD}$DIR_COUNT${RESET}${BLUE} directories${RESET}"
+    echo -e "${BLUE}└─ Found ${BOLD}$FILE_COUNT${RESET}${BLUE} files${RESET}\n"
+    
+    # Read reference timestamp (created during unpack)
+    TIMESTAMP_FILE="${EXTRACT_DIR}/.unpack_timestamp"
+    if [ ! -f "$TIMESTAMP_FILE" ]; then
+        echo -e "${YELLOW}No timestamp reference found. Nothing to restore.${RESET}"
+        return
     fi
+
+    echo -e "${BLUE}Scanning for modified files...${RESET}"
     
-    # Update progress every 100 items
-    if [ $((processed % 100)) -eq 0 ]; then
-      echo -ne "\r${BLUE}[${spinner[$((spin++))]}] Progress: ${percentage}% (${processed}/${total_items})${RESET}"
-      spin=$((spin % 10))
+    # Since we used tar --selinux during unpack, we only need to handle 
+    # permissions/ownership for modified files
+    MODIFIED_FILES=$(find "$EXTRACT_DIR" -type f -newer "$TIMESTAMP_FILE" 2>/dev/null | grep -v "/.unpack_timestamp$" || true)
+    
+    # Count changes
+    MOD_FILES_COUNT=$(echo "$MODIFIED_FILES" | grep -c '^' || echo 0)
+    
+    echo -e "${BLUE}Found ${MOD_FILES_COUNT} modified files${RESET}\n"
+
+    # Only restore attributes for modified files
+    if [ "$MOD_FILES_COUNT" -gt 0 ]; then
+        echo -e "${BLUE}Restoring attributes for modified files...${RESET}"
+        spin=0
+        processed=0
+        
+        echo "$MODIFIED_FILES" | while read -r file; do
+            [ -z "$file" ] && continue
+            processed=$((processed + 1))
+            percentage=$((processed * 100 / MOD_FILES_COUNT))
+            rel_path=${file#$EXTRACT_DIR}
+            
+            # Only need to handle fs_config for modified files
+            # SELinux context was preserved by tar --selinux
+            attrs=$(grep "^$rel_path " "$FS_CONFIG_FILE" | cut -d' ' -f2-)
+            
+            if [ -n "$attrs" ]; then
+                uid=$(echo "$attrs" | awk '{print $1}' | tr -d '\n')
+                gid=$(echo "$attrs" | awk '{print $2}' | tr -d '\n')
+                mode=$(echo "$attrs" | awk '{print $3}' | tr -d '\n')
+                
+                if [[ "$uid" =~ ^[0-9]+$ ]] && [[ "$gid" =~ ^[0-9]+$ ]]; then
+                    chown "$uid:$gid" "$file" 2>/dev/null || true
+                    chmod "$mode" "$file" 2>/dev/null || true
+                fi
+            fi
+            
+            echo -ne "\r${BLUE}[${spinner[$((spin++))]}] Processing: ${percentage}% (${processed}/${MOD_FILES_COUNT})${RESET}"
+            spin=$((spin % 10))
+        done
+        echo -e "\r${GREEN}[✓] File attributes restored${RESET}\n"
+    else
+        echo -e "${GREEN}No modified files to process.${RESET}\n"
     fi
-  done
-  echo -e "\r${GREEN}[✓] Attributes restored successfully${RESET}"
-  
-  # SELinux contexts restoration with progress
-  if [ -f "$FILE_CONTEXTS_FILE" ] && command -v chcon &> /dev/null; then
-    echo -e "${BLUE}Restoring SELinux contexts...${RESET}"
-    total_contexts=$(grep -v "^#" "$FILE_CONTEXTS_FILE" | wc -l)
-    processed=0
-    spin=0
-    
-    grep -v "^#" "$FILE_CONTEXTS_FILE" | while read -r line; do
-      processed=$((processed + 1))
-      percentage=$((processed * 100 / total_contexts))
-      
-      file=$(echo "$line" | awk '{print $1}')
-      context=$(echo "$line" | cut -d' ' -f2-)
-      
-      if [ -e "$EXTRACT_DIR/$file" ] || [ -L "$EXTRACT_DIR/$file" ]; then
-        chcon "$context" "$EXTRACT_DIR/$file" 2>/dev/null
-      fi
-      
-      if [ $((processed % 100)) -eq 0 ]; then
-        echo -ne "\r${BLUE}[${spinner[$((spin++))]}] SELinux: ${percentage}% (${processed}/${total_contexts})${RESET}"
-        spin=$((spin % 10))
-      fi
-    done
-    echo -e "\r${GREEN}[✓] SELinux contexts restored${RESET}"
-  fi
-  
-  # Symlinks restoration with progress
-  if [ -f "$SYMLINKS_FILE" ]; then
-    echo -e "${BLUE}Restoring symlinks...${RESET}"
-    total_links=$(grep -v "^#" "$SYMLINKS_FILE" | grep " -> " | wc -l)
-    processed=0
-    spin=0
-    
-    grep -v "^#" "$SYMLINKS_FILE" | grep " -> " | while read -r line; do
-      processed=$((processed + 1))
-      percentage=$((processed * 100 / total_links))
-      
-      link_path=$(echo "$line" | awk -F " -> " '{print $1}')
-      link_target=$(echo "$line" | awk -F " -> " '{print $2}')
-      
-      mkdir -p "$(dirname "$EXTRACT_DIR/$link_path")" 2>/dev/null
-      rm -f "$EXTRACT_DIR/$link_path" 2>/dev/null
-      ln -sf "$link_target" "$EXTRACT_DIR/$link_path"
-      
-      # Only show progress for larger numbers of symlinks
-      if [ $total_links -gt 100 ] && [ $((processed % 50)) -eq 0 ]; then
-        echo -ne "\r${BLUE}[${spinner[$((spin++))]}] Symlinks: ${percentage}% (${processed}/${total_links})${RESET}"
-        spin=$((spin % 10))
-      fi
-    done
-    
-    # Clear the progress line before showing completion
-    echo -ne "\r${BLUE}[${spinner[$((spin % 10))]}] Symlinks: 100% (${total_links}/${total_links})${RESET}"
-    echo -e "\n${GREEN}[✓] Restored ${total_links} symlinks${RESET}"
-  fi
 }
 
-# Detect and process new files
-detect_modified_files
-apply_attributes
+# Start repacking process
 restore_attributes
 
 # Ask for compression method
