@@ -40,15 +40,39 @@ IMAGE_FILE="$1"
 PARTITION_NAME=$(basename "$IMAGE_FILE" .img)
 MOUNT_DIR="/tmp/${PARTITION_NAME}_mount"
 EXTRACT_DIR="extracted_${PARTITION_NAME}"
+REPACK_INFO="${EXTRACT_DIR}/.repack_info"
 RAW_IMAGE=""
-FS_CONFIG_FILE="${EXTRACT_DIR}/fs-config.txt"
-FILE_CONTEXTS_FILE="${EXTRACT_DIR}/file_contexts.txt"
+FS_CONFIG_FILE="${REPACK_INFO}/fs-config.txt"
+FILE_CONTEXTS_FILE="${REPACK_INFO}/file_contexts.txt"
 
 # Check if image file exists
 if [ ! -f "$IMAGE_FILE" ]; then
   echo -e "${RED}Error: Image file '$IMAGE_FILE' not found.${RESET}"
   exit 1
 fi
+
+# Add show_progress function before cleanup()
+show_progress() {
+    local pid=$1
+    local target=$2
+    local total=$3
+    local spin=0
+    local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
+
+    while kill -0 $pid 2>/dev/null; do
+        current_size=$(du -sb "$target" | cut -f1)
+        percentage=$((current_size * 100 / total))
+        current_hr=$(numfmt --to=iec-i --suffix=B "$current_size")
+        total_hr=$(numfmt --to=iec-i --suffix=B "$total")
+        
+        # Clear entire line before printing
+        echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Copying: ${percentage}% (${current_hr}/${total_hr})${RESET}"
+        sleep 0.1
+    done
+    
+    # Clear line and show completion
+    echo -e "\r\033[K${GREEN}[✓] Copy completed${RESET}\n"
+}
 
 # Function to clean up mount point and temporary files
 cleanup() {
@@ -78,17 +102,18 @@ trap cleanup EXIT INT TERM
 
 # Create or recreate mount directory
 if [ -d "$MOUNT_DIR" ]; then
-  echo -e "${YELLOW}Removing existing mount directory...${RESET}\n"
+  echo -e "${YELLOW}Removing existing mount directory...${RESET}"
   rm -rf "$MOUNT_DIR"
 fi
 mkdir -p "$MOUNT_DIR"
 
-# Remove extraction directory if it exists
+# Create extraction and repack info directories
 if [ -d "$EXTRACT_DIR" ]; then
   echo -e "${YELLOW}Removing existing extraction directory: ${EXTRACT_DIR}${RESET}"
   rm -rf "$EXTRACT_DIR"
 fi
 mkdir -p "$EXTRACT_DIR"
+mkdir -p "$REPACK_INFO"
 
 # Try to mount the image
 echo -e "Attempting to mount ${BOLD}$IMAGE_FILE${RESET}..."
@@ -131,19 +156,19 @@ else
 fi
 
 # First get root directory context specifically
-echo -e "${BLUE}Capturing root directory attributes...${RESET}"
+echo -e "\n${BLUE}Capturing root directory attributes...${RESET}"
 ROOT_CONTEXT=$(ls -dZ "$MOUNT_DIR" | awk '{print $1}')
 ROOT_STATS=$(stat -c "%u %g %a" "$MOUNT_DIR")
 
 # Create config files with root attributes first
 echo "# FS config extracted from $IMAGE_FILE on $(date)" > "$FS_CONFIG_FILE"
-echo "/ $ROOT_STATS capabilities=0x0" >> "$FS_CONFIG_FILE"
+echo "/ $ROOT_STATS" >> "$FS_CONFIG_FILE"
 
 echo "# File contexts extracted from $IMAGE_FILE on $(date)" > "$FILE_CONTEXTS_FILE"
 echo "/ $ROOT_CONTEXT" >> "$FILE_CONTEXTS_FILE"
 
 # Extract metadata with progress
-echo -e "${BLUE}Extracting file attributes...${RESET}"
+echo -e "\n${BLUE}Extracting file attributes...${RESET}"
 total_items=$(find "$MOUNT_DIR" -mindepth 1 | wc -l)
 processed=0
 spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
@@ -154,55 +179,74 @@ find "$MOUNT_DIR" -mindepth 1 | while read -r item; do
     percentage=$((processed * 100 / total_items))
     
     if [ $((processed % 50)) -eq 0 ]; then
-        echo -ne "\r${BLUE}[${spinner[$((spin++))]}] Processing: ${percentage}% (${processed}/${total_items})${RESET}"
-        spin=$((spin % 10))
+        echo -ne "\r${BLUE}[${spinner[$((spin++ % 10))]}] Processing: ${percentage}% (${processed}/${total_items})${RESET}"
     fi
     
     rel_path=${item#$MOUNT_DIR}
     
-    # Get attributes and context
+    # Get basic attributes and context
     stats=$(stat -c "%u %g %a" "$item" 2>/dev/null)
     context=$(ls -dZ "$item" 2>/dev/null | awk '{print $1}')
     
-    [ -n "$stats" ] && echo "$rel_path $stats capabilities=0x0" >> "$FS_CONFIG_FILE"
+    [ -n "$stats" ] && echo "$rel_path $stats" >> "$FS_CONFIG_FILE"
     [ -n "$context" ] && [ "$context" != "?" ] && echo "$rel_path $context" >> "$FILE_CONTEXTS_FILE"
 done
 echo -e "\r${GREEN}[✓] Attributes extracted successfully${RESET}\n"
 
-# Now copy all files with preserved SELinux contexts
-echo -e "${BLUE}Copying files from image...${RESET}"
-
-total_size=$(du -sb "$MOUNT_DIR" | cut -f1)
-total_hr=$(numfmt --to=iec-i --suffix=B "$total_size")
+# Calculate checksums with spinner
+echo -e "${BLUE}Calculating original file checksums...${RESET}"
+(cd "$MOUNT_DIR" && find . -type f -exec sha256sum {} \;) > "${REPACK_INFO}/original_checksums.txt" &
+spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
 spin=0
-
-# Use tar with progress through pv if available
-if command -v pv >/dev/null 2>&1; then
-  (cd "$MOUNT_DIR" && tar --selinux -cf - .) | pv -s "$total_size" | (cd "$EXTRACT_DIR" && tar --selinux -xf -)
-else
-  # Custom progress for tar without pv
-  (cd "$MOUNT_DIR" && tar --selinux -cf - .) | (cd "$EXTRACT_DIR" && tar --selinux -xf -) &
-  
-  while kill -0 $! 2>/dev/null; do
-    current_size=$(du -sb "$EXTRACT_DIR" | cut -f1)
-    current_hr=$(numfmt --to=iec-i --suffix=B "$current_size")
-    percentage=$((current_size * 100 / total_size))
-    echo -ne "\r${BLUE}[${spinner[$((spin++))]}] Copying files: ${percentage}% (${current_hr}/${total_hr})${RESET}"
-    spin=$((spin % 10))
+while kill -0 $! 2>/dev/null; do
+    # Clear entire line first
+    echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Generating checksums${RESET}"
     sleep 0.1
-  done
-  echo -ne "\r${BLUE}$(printf '%*s' "100" '')${RESET}\r"  # Clear the progress line
+done
+
+# Clear line and show completion
+echo -e "\r\033[K${GREEN}[✓] Checksums generated${RESET}\n"
+
+# Copy files with SELinux contexts preserved
+echo -e "${BLUE}Copying files with preserved attributes...${RESET}"
+echo -e "${BLUE}┌─ Source: ${MOUNT_DIR}${RESET}"
+echo -e "${BLUE}└─ Target: ${EXTRACT_DIR}${RESET}\n"
+
+# Calculate total size for progress
+total_size=$(du -sb "$MOUNT_DIR" | cut -f1)
+
+# Use tar with selinux flag for proper context preservation
+if command -v pv >/dev/null 2>&1; then
+    (cd "$MOUNT_DIR" && tar --selinux -cf - .) | \
+    pv -s "$total_size" -N "Copying" | \
+    (cd "$EXTRACT_DIR" && tar --selinux -xf -)
+    echo -e "\n${GREEN}[✓] Files copied successfully with SELinux contexts${RESET}"
+else
+    # Use custom progress display
+    (cd "$MOUNT_DIR" && tar --selinux -cf - .) | \
+    (cd "$EXTRACT_DIR" && tar --selinux -xf -) & 
+    show_progress $! "$EXTRACT_DIR" "$total_size"
+    wait $!
+    # No need for another success message as show_progress already prints one
 fi
 
-echo -e "\n${GREEN}[✓] Files copied successfully${RESET}"
+# Verify copy succeeded
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}[✓] Files copied successfully with SELinux contexts${RESET}"
+else
+    echo -e "\n${RED}[!] Error occurred during copy${RESET}"
+    exit 1
+fi
 
-# Store timestamp for tracking modifications
-touch "${EXTRACT_DIR}/.unpack_timestamp"
+# Store timestamp and metadata location for repacking
+echo "UNPACK_TIME=$(date +%s)" > "${REPACK_INFO}/metadata.txt"
+echo "SOURCE_IMAGE=$IMAGE_FILE" >> "${REPACK_INFO}/metadata.txt"
 
 # Verify extraction
 if [ $? -eq 0 ]; then
-  echo -e "${GREEN}Extraction completed successfully.${RESET}\n"
+  echo -e "\n${GREEN}Extraction completed successfully.${RESET}"
   echo -e "${BOLD}Files extracted to: ${EXTRACT_DIR}${RESET}"
+  echo -e "${BOLD}Repack info stored in: ${REPACK_INFO}${RESET}"
   echo -e "${BOLD}File contexts saved to: ${FILE_CONTEXTS_FILE}${RESET}"
   echo -e "${BOLD}FS config saved to: ${FS_CONFIG_FILE}${RESET}\n"
 
@@ -218,7 +262,7 @@ fi
 # Unmount the image
 if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
   umount "$MOUNT_DIR"
-  echo -e "${GREEN}Image unmounted successfully.${RESET}"
+  echo -e "\n${GREEN}Image unmounted successfully.${RESET}"
 fi
 
-echo -e "${GREEN}${BOLD}Done!${RESET}"
+echo -e "\n${GREEN}${BOLD}Done!${RESET}"

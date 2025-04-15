@@ -45,6 +45,34 @@ if [ $# -ne 1 ]; then
 fi
 
 EXTRACT_DIR="$1"
+REPACK_INFO="${EXTRACT_DIR}/.repack_info"
+PARTITION_NAME=$(basename "$EXTRACT_DIR" | sed 's/^extracted_//')
+OUTPUT_IMG="${PARTITION_NAME}_repacked.img"
+FS_CONFIG_FILE="${REPACK_INFO}/fs-config.txt"
+FILE_CONTEXTS_FILE="${REPACK_INFO}/file_contexts.txt"
+
+# Add temp directory definition and cleanup function
+TEMP_ROOT="/tmp/repack-erofs"
+WORK_DIR="${TEMP_ROOT}/${PARTITION_NAME}_work"
+
+cleanup() {
+    echo -e "\n${YELLOW}Cleaning up temporary files...${RESET}"
+    [ -d "$TEMP_ROOT" ] && rm -rf "$TEMP_ROOT"
+    # In case script is interrupted during image creation
+    [ -f "$OUTPUT_IMG.tmp" ] && rm -f "$OUTPUT_IMG.tmp"
+    echo -e "${GREEN}Cleanup completed.${RESET}"
+    exit 1
+}
+
+# Register cleanup for interrupts and errors
+trap cleanup INT TERM EXIT
+
+# Check if repack info exists
+if [ ! -d "$REPACK_INFO" ]; then
+  echo -e "${RED}Error: Repack info directory not found at ${REPACK_INFO}${RESET}"
+  echo -e "${RED}This directory does not appear to be created by the unpack script.${RESET}"
+  exit 1
+fi
 
 # Remove trailing slash if present
 EXTRACT_DIR=${EXTRACT_DIR%/}
@@ -55,90 +83,190 @@ if [ ! -d "$EXTRACT_DIR" ]; then
   exit 1
 fi
 
-PARTITION_NAME=$(basename "$EXTRACT_DIR" | sed 's/^extracted_//')
-OUTPUT_IMG="${PARTITION_NAME}_repacked.img"
-FS_CONFIG_FILE="${EXTRACT_DIR}/fs-config.txt"
-FILE_CONTEXTS_FILE="${EXTRACT_DIR}/file_contexts.txt"
-SYMLINKS_FILE="${EXTRACT_DIR}/symlinks.txt"
-
-# Check if file attribute files exist
-if [ ! -f "$FS_CONFIG_FILE" ]; then
-  echo -e "${YELLOW}Warning: FS config file not found at ${FS_CONFIG_FILE}.${RESET}"
-  echo -e "${YELLOW}File permissions and ownership will not be applied.${RESET}"
-fi
-
-if [ ! -f "$FILE_CONTEXTS_FILE" ]; then
-  echo -e "${YELLOW}Warning: File contexts file not found at ${FILE_CONTEXTS_FILE}.${RESET}"
-  echo -e "${YELLOW}SELinux contexts will not be applied.${RESET}"
-fi
-
 restore_attributes() {
     echo -e "\n${BLUE}Initializing permission restoration...${RESET}"
     echo -e "${BLUE}┌─ Analyzing filesystem structure...${RESET}"
     
-    # Count dirs and files
-    DIR_COUNT=$(find "$EXTRACT_DIR" -type d | wc -l)
-    FILE_COUNT=$(find "$EXTRACT_DIR" -type f | wc -l)
+    # Get filesystem counts
+    DIR_COUNT=$(find "$1" -type d | wc -l)
+    FILE_COUNT=$(find "$1" -type f | wc -l)
     
     echo -e "${BLUE}├─ Found ${BOLD}$DIR_COUNT${RESET}${BLUE} directories${RESET}"
     echo -e "${BLUE}└─ Found ${BOLD}$FILE_COUNT${RESET}${BLUE} files${RESET}\n"
-    
-    # Read reference timestamp (created during unpack)
-    TIMESTAMP_FILE="${EXTRACT_DIR}/.unpack_timestamp"
-    if [ ! -f "$TIMESTAMP_FILE" ]; then
-        echo -e "${YELLOW}No timestamp reference found. Nothing to restore.${RESET}"
-        return
-    fi
 
-    echo -e "${BLUE}Scanning for modified files...${RESET}"
-    
-    # Since we used tar --selinux during unpack, we only need to handle 
-    # permissions/ownership for modified files
-    MODIFIED_FILES=$(find "$EXTRACT_DIR" -type f -newer "$TIMESTAMP_FILE" 2>/dev/null | grep -v "/.unpack_timestamp$" || true)
-    
-    # Count changes
-    MOD_FILES_COUNT=$(echo "$MODIFIED_FILES" | grep -c '^' || echo 0)
-    
-    echo -e "${BLUE}Found ${MOD_FILES_COUNT} modified files${RESET}\n"
+    # First process directories
+    echo -e "${BLUE}Processing directory structure...${RESET}"
+    processed=0
+    spin=0
+    spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
 
-    # Only restore attributes for modified files
-    if [ "$MOD_FILES_COUNT" -gt 0 ]; then
-        echo -e "${BLUE}Restoring attributes for modified files...${RESET}"
-        spin=0
-        processed=0
+    # Create list of new directories by comparing with fs-config
+    find "$1" -type d | while read -r item; do
+        processed=$((processed + 1))
+        percentage=$((processed * 100 / DIR_COUNT))
         
-        echo "$MODIFIED_FILES" | while read -r file; do
-            [ -z "$file" ] && continue
-            processed=$((processed + 1))
-            percentage=$((processed * 100 / MOD_FILES_COUNT))
-            rel_path=${file#$EXTRACT_DIR}
+        rel_path=${item#$1}
+        [ -z "$rel_path" ] && rel_path="/"
+        
+        # Check if directory exists in original config
+        stored_attrs=$(grep "^$rel_path " "$FS_CONFIG_FILE" 2>/dev/null | cut -d' ' -f2-)
+        stored_context=$(grep "^$rel_path " "$FILE_CONTEXTS_FILE" 2>/dev/null | cut -d' ' -f2-)
+        
+        if [ -n "$stored_attrs" ]; then
+            # Restore original attributes
+            uid=$(echo "$stored_attrs" | awk '{print $1}')
+            gid=$(echo "$stored_attrs" | awk '{print $2}')
+            mode=$(echo "$stored_attrs" | awk '{print $3}')
+            chown "$uid:$gid" "$item" 2>/dev/null || true
+            chmod "$mode" "$item" 2>/dev/null || true
+        else
+            # New directory - apply default permissions from parent
+            parent_dir=$(dirname "$rel_path")
+            parent_attrs=$(grep "^$parent_dir " "$FS_CONFIG_FILE" 2>/dev/null | cut -d' ' -f2-)
+            parent_context=$(grep "^$parent_dir " "$FILE_CONTEXTS_FILE" 2>/dev/null | cut -d' ' -f2-)
             
-            # Only need to handle fs_config for modified files
-            # SELinux context was preserved by tar --selinux
-            attrs=$(grep "^$rel_path " "$FS_CONFIG_FILE" | cut -d' ' -f2-)
-            
-            if [ -n "$attrs" ]; then
-                uid=$(echo "$attrs" | awk '{print $1}' | tr -d '\n')
-                gid=$(echo "$attrs" | awk '{print $2}' | tr -d '\n')
-                mode=$(echo "$attrs" | awk '{print $3}' | tr -d '\n')
-                
-                if [[ "$uid" =~ ^[0-9]+$ ]] && [[ "$gid" =~ ^[0-9]+$ ]]; then
-                    chown "$uid:$gid" "$file" 2>/dev/null || true
-                    chmod "$mode" "$file" 2>/dev/null || true
-                fi
+            if [ -n "$parent_attrs" ]; then
+                uid=$(echo "$parent_attrs" | awk '{print $1}')
+                gid=$(echo "$parent_attrs" | awk '{print $2}')
+                chown "$uid:$gid" "$item" 2>/dev/null || true
+                chmod 755 "$item" 2>/dev/null || true
             fi
+            [ -n "$parent_context" ] && chcon "$parent_context" "$item" 2>/dev/null || true
+        fi
+        
+        [ -n "$stored_context" ] && chcon "$stored_context" "$item" 2>/dev/null || true
+        
+        echo -ne "\r\033[K${BLUE}[${spinner[$((spin++))]}] Mapping contexts: ${percentage}% (${processed}/${DIR_COUNT})${RESET}"
+        spin=$((spin % 10))
+    done
+    echo -e "\r\033[K${GREEN}[✓] Directory attributes mapped${RESET}\n"
+
+    # Then process files
+    echo -e "${BLUE}Processing file permissions...${RESET}"
+    processed=0
+    spin=0
+
+    find "$1" -type f | while read -r item; do
+        processed=$((processed + 1))
+        percentage=$((processed * 100 / FILE_COUNT))
+        
+        rel_path=${item#$1}
+        stored_attrs=$(grep "^$rel_path " "$FS_CONFIG_FILE" 2>/dev/null | cut -d' ' -f2-)
+        stored_context=$(grep "^$rel_path " "$FILE_CONTEXTS_FILE" 2>/dev/null | cut -d' ' -f2-)
+        
+        if [ -n "$stored_attrs" ]; then
+            # Restore original attributes
+            uid=$(echo "$stored_attrs" | awk '{print $1}')
+            gid=$(echo "$stored_attrs" | awk '{print $2}')
+            mode=$(echo "$stored_attrs" | awk '{print $3}')
+            chown "$uid:$gid" "$item" 2>/dev/null || true
+            chmod "$mode" "$item" 2>/dev/null || true
+        else
+            # New file - apply default permissions from parent
+            parent_dir=$(dirname "$rel_path")
+            parent_attrs=$(grep "^$parent_dir " "$FS_CONFIG_FILE" 2>/dev/null | cut -d' ' -f2-)
+            parent_context=$(grep "^$parent_dir " "$FILE_CONTEXTS_FILE" 2>/dev/null | cut -d' ' -f2-)
             
-            echo -ne "\r${BLUE}[${spinner[$((spin++))]}] Processing: ${percentage}% (${processed}/${MOD_FILES_COUNT})${RESET}"
-            spin=$((spin % 10))
-        done
-        echo -e "\r${GREEN}[✓] File attributes restored${RESET}\n"
-    else
-        echo -e "${GREEN}No modified files to process.${RESET}\n"
-    fi
+            if [ -n "$parent_attrs" ]; then
+                uid=$(echo "$parent_attrs" | awk '{print $1}')
+                gid=$(echo "$parent_attrs" | awk '{print $2}')
+                chown "$uid:$gid" "$item" 2>/dev/null || true
+                chmod 644 "$item" 2>/dev/null || true
+            fi
+            [ -n "$parent_context" ] && chcon "$parent_context" "$item" 2>/dev/null || true
+        fi
+        
+        # Always try to restore original context if available
+        [ -n "$stored_context" ] && chcon "$stored_context" "$item" 2>/dev/null || true
+
+        echo -ne "\r\033[K${BLUE}[${spinner[$((spin++))]}] Restoring contexts: ${percentage}% (${processed}/${FILE_COUNT})${RESET}"
+        spin=$((spin % 10))
+    done
+    echo -e "\r\033[K${GREEN}[✓] File attributes restored${RESET}\n"
 }
 
-# Start repacking process
-restore_attributes
+verify_modifications() {
+    local src="$1"
+    echo -e "\n${BLUE}Verifying modified files...${RESET}"
+    
+    # Generate current checksums excluding .repack_info
+    local curr_sums="/tmp/current_checksums.txt"
+    (cd "$src" && find . -type f -not -path "./.repack_info/*" -exec sha256sum {} \;) > "$curr_sums"
+    
+    echo -e "${BLUE}Analyzing changes...${RESET}"
+    local modified_files=0
+    local total_files=0
+    local spin=0
+    local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
+    
+    while IFS= read -r line; do
+        total_files=$((total_files + 1))
+        checksum=$(echo "$line" | cut -d' ' -f1)
+        file=$(echo "$line" | cut -d' ' -f3-)
+        
+        # Show spinner while processing
+        echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Analyzing files...${RESET}"
+        
+        if ! grep -q "$checksum.*$file" "${REPACK_INFO}/original_checksums.txt" 2>/dev/null; then
+            modified_files=$((modified_files + 1))
+            echo -e "\r\033[K${YELLOW}Modified: $file${RESET}"
+        fi
+    done < "$curr_sums"
+    
+    # Clear progress line and show summary
+    echo -e "\r\033[K${BLUE}Found ${YELLOW}$modified_files${BLUE} modified files out of $total_files total files${RESET}"
+    rm -f "$curr_sums"
+}
+
+show_copy_progress() {
+    local src="$1"
+    local dst="$2"
+    local total_size=$(du -sb "$src" | cut -f1)
+    local spin=0
+    local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
+
+    while kill -0 $! 2>/dev/null; do
+        current_size=$(du -sb "$dst" | cut -f1)
+        percentage=$((current_size * 100 / total_size))
+        current_hr=$(numfmt --to=iec-i --suffix=B "$current_size")
+        total_hr=$(numfmt --to=iec-i --suffix=B "$total_size")
+        
+        # Clear entire line with \033[K before printing
+        echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Copying to work directory: ${percentage}% (${current_hr}/${total_hr})${RESET}"
+        sleep 0.1
+    done
+    
+    # Clear line and show completion
+    echo -e "\r\033[K${GREEN}[✓] Files copied to work directory${RESET}\n"
+}
+
+prepare_working_directory() {
+    echo -e "\n${BLUE}Preparing working directory...${RESET}"
+    mkdir -p "$TEMP_ROOT"
+    [ -d "$WORK_DIR" ] && rm -rf "$WORK_DIR"
+    mkdir -p "$WORK_DIR"
+    
+    # Copy with SELinux contexts and progress
+    echo -e "${BLUE}Copying files to work directory...${RESET}"
+    (cd "$EXTRACT_DIR" && tar --selinux -cf - .) | (cd "$WORK_DIR" && tar --selinux -xf -) &
+    show_copy_progress "$EXTRACT_DIR" "$WORK_DIR"
+    wait $!
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Error: Failed to copy files with attributes${RESET}"
+        cleanup
+    fi
+    
+    verify_modifications "$WORK_DIR"
+    restore_attributes "$WORK_DIR"
+}
+
+# Start repacking process with better visuals
+echo -e "\n${BLUE}${BOLD}Starting EROFS repacking process...${RESET}"
+echo -e "${BLUE}┌─ Source directory: ${BOLD}$EXTRACT_DIR${RESET}"
+echo -e "${BLUE}└─ Target image: ${BOLD}$OUTPUT_IMG${RESET}\n"
+
+prepare_working_directory
 
 # Ask for compression method
 echo -e "\n${BLUE}${BOLD}Select compression method:${RESET}"
@@ -179,14 +307,10 @@ fi
 
 # Create the EROFS image with simplest command
 MKFS_CMD="mkfs.erofs"
-
-# Add compression if selected
 if [ -n "$COMPRESSION" ]; then
   MKFS_CMD="$MKFS_CMD $COMPRESSION"
 fi
-
-# Add output and input paths
-MKFS_CMD="$MKFS_CMD $OUTPUT_IMG $EXTRACT_DIR"
+MKFS_CMD="$MKFS_CMD $OUTPUT_IMG.tmp $WORK_DIR"
 
 # Show the command
 echo -e "\n${BLUE}Executing command:${RESET}"
@@ -196,23 +320,26 @@ echo -e "${BOLD}$MKFS_CMD${RESET}\n"
 echo -e "${BLUE}Creating EROFS image... This may take some time.${RESET}\n"
 eval $MKFS_CMD
 
-# Check if image creation was successful
+# On success, move temp file to final location
 if [ $? -eq 0 ]; then
-  echo -e "\n${GREEN}${BOLD}Successfully created EROFS image: $OUTPUT_IMG${RESET}"
-  echo -e "${BLUE}Image size: $(du -h "$OUTPUT_IMG" | cut -f1)${RESET}"
-  
-  # Transfer ownership back to actual user
-  if [ -n "$SUDO_USER" ]; then
-    chown -R "$SUDO_USER:$SUDO_USER" "$EXTRACT_DIR"
-    chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"
-  fi
+    mv "$OUTPUT_IMG.tmp" "$OUTPUT_IMG"
+    echo -e "\n${GREEN}${BOLD}Successfully created EROFS image: $OUTPUT_IMG${RESET}"
+    echo -e "${BLUE}Image size: $(du -h "$OUTPUT_IMG" | cut -f1)${RESET}"
+    
+    # Transfer ownership back to actual user
+    if [ -n "$SUDO_USER" ]; then
+        chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"
+    fi
+
+    # Clear trap before normal exit
+    trap - INT TERM EXIT
+    cleanup
 else
-  echo -e "\n${RED}Error occurred during image creation.${RESET}"
-  exit 1
+    echo -e "\n${RED}Error occurred during image creation.${RESET}"
+    cleanup
 fi
 
 # Clean up temporary files
-rm -f /tmp/all_files.txt /tmp/config_files.txt /tmp/new_files.txt
-rm -f /tmp/all_dirs.txt /tmp/special_paths.txt /tmp/new_dirs.txt /tmp/new_dirs_sorted.txt
+cleanup
 
 echo -e "\n${GREEN}${BOLD}Done!${RESET}"
