@@ -89,7 +89,6 @@ restore_attributes() {
     
     # Process symlinks first using the special symlink info file
     if [ -f "${REPACK_INFO}/symlink_info.txt" ]; then
-        echo -e "${BLUE}Restoring symlink attributes...${RESET}"
         while read -r line; do
             # Skip comments
             [[ "$line" =~ ^#.*$ ]] && continue
