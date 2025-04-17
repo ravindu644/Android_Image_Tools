@@ -299,38 +299,43 @@ prepare_working_directory
 echo -e "\n${BLUE}${BOLD}Select compression method:${RESET}"
 echo -e "1. none (default)"
 echo -e "2. lz4"
-echo -e "3. lz4hc"
-read -p "Enter your choice [1-3]: " COMP_CHOICE
+echo -e "3. lz4hc (level 0-12, default 9)"
+echo -e "4. deflate (level 0-9, default 1)"
+read -p "Enter your choice [1-4]: " COMP_CHOICE
 
 case $COMP_CHOICE in
   2)
     COMPRESSION="-zlz4"
     ;;
   3)
-    COMPRESSION="-zlz4hc"
+    echo -e "\n${BLUE}${BOLD}Select LZ4HC compression level (0-12):${RESET}"
+    echo -e "Default: 9 (higher = better compression but slower)"
+    read -p "Enter compression level: " COMP_LEVEL
+    
+    if [[ "$COMP_LEVEL" =~ ^([0-9]|1[0-2])$ ]]; then
+      COMPRESSION="-zlz4hc,level=$COMP_LEVEL"
+    else
+      echo -e "${YELLOW}Invalid level. Using default level 9.${RESET}"
+      COMPRESSION="-zlz4hc"
+    fi
+    ;;
+  4)
+    echo -e "\n${BLUE}${BOLD}Select DEFLATE compression level (0-9):${RESET}"
+    echo -e "Default: 1 (higher = better compression but slower)"
+    read -p "Enter compression level: " COMP_LEVEL
+    
+    if [[ "$COMP_LEVEL" =~ ^[0-9]$ ]]; then
+      COMPRESSION="-zdeflate,level=$COMP_LEVEL"
+    else
+      echo -e "${YELLOW}Invalid level. Using default level 1.${RESET}"
+      COMPRESSION="-zdeflate"
+    fi
     ;;
   *)
     COMPRESSION=""
     echo -e "${BLUE}Using no compression.${RESET}"
     ;;
 esac
-
-# Ask for compression level if using compression
-if [[ "$COMPRESSION" == *"lz4"* ]]; then
-  echo -e "\n${BLUE}${BOLD}Select compression level:${RESET}"
-  echo -e "For lz4: 1-9 (default: 6, higher = better compression but slower)"
-  echo -e "For lz4hc: 1-12 (default: 9, higher = better compression but slower)"
-  read -p "Enter compression level: " COMP_LEVEL
-  
-  # Validate compression level
-  if [[ "$COMPRESSION" == "-zlz4" && "$COMP_LEVEL" =~ ^[1-9]$ ]]; then
-    COMPRESSION="$COMPRESSION,level=$COMP_LEVEL"
-  elif [[ "$COMPRESSION" == "-zlz4hc" && "$COMP_LEVEL" =~ ^([1-9]|1[0-2])$ ]]; then
-    COMPRESSION="$COMPRESSION,level=$COMP_LEVEL"
-  elif [[ -n "$COMP_LEVEL" ]]; then
-    echo -e "${YELLOW}Invalid compression level. Using default level.${RESET}"
-  fi
-fi
 
 # Create the EROFS image with simplest command
 MKFS_CMD="mkfs.erofs"
