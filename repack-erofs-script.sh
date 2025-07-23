@@ -61,11 +61,12 @@ cleanup() {
     # In case script is interrupted during image creation
     [ -f "$OUTPUT_IMG.tmp" ] && rm -f "$OUTPUT_IMG.tmp"
     echo -e "${GREEN}Cleanup completed.${RESET}"
-    exit 1
+    # Only exit with error if called from trap
+    [ "$1" = "ERROR" ] && exit 1 || exit 0
 }
 
 # Register cleanup for interrupts and errors
-trap cleanup INT TERM EXIT
+trap 'cleanup ERROR' INT TERM EXIT
 
 # Check if repack info exists
 if [ ! -d "$REPACK_INFO" ]; then
@@ -83,92 +84,102 @@ if [ ! -d "$EXTRACT_DIR" ]; then
   exit 1
 fi
 
+find_matching_pattern() {
+    local path="$1"
+    local type="$2"  # "file" or "dir"
+    local extension=""
+    
+    if [ "$type" = "file" ]; then
+        extension=$(echo "$path" | grep -o '\.[^.]*$' || echo "")
+        if [ -n "$extension" ]; then
+            # First try exact extension match
+            pattern=$(grep "$extension " "$FS_CONFIG_FILE" | head -n1)
+            if [ -n "$pattern" ]; then
+                echo "$pattern"
+                return
+            fi
+        fi
+    fi
+    
+    # Get parent directory's attributes as fallback
+    parent_dir=$(dirname "$path")
+    parent_pattern=$(grep "^$parent_dir " "$FS_CONFIG_FILE" | head -n1)
+    echo "$parent_pattern"
+}
+
 restore_attributes() {
     echo -e "\n${BLUE}Initializing permission restoration...${RESET}"
     echo -e "${BLUE}┌─ Analyzing filesystem structure...${RESET}"
     
-    # Process symlinks first using the special symlink info file
+    # Process symlinks first
     if [ -f "${REPACK_INFO}/symlink_info.txt" ]; then
-        while read -r line; do
-            # Skip comments
-            [[ "$line" =~ ^#.*$ ]] && continue
-            
-            # Format: path target uid gid mode context
-            path=$(echo "$line" | awk '{print $1}')
-            target=$(echo "$line" | awk '{print $2}')
-            uid=$(echo "$line" | awk '{print $3}')
-            gid=$(echo "$line" | awk '{print $4}')
-            mode=$(echo "$line" | awk '{print $5}')
-            context=$(echo "$line" | awk '{print $6}')
+        while IFS=' ' read -r path target uid gid mode context || [ -n "$path" ]; do
+            [ -z "$path" ] && continue
+            [[ "$path" =~ ^#.*$ ]] && continue
             
             full_path="$1$path"
-            
-            # Recreate symlink if it doesn't exist
-            if [ ! -L "$full_path" ]; then
-                ln -sf "$target" "$full_path"
-            fi
-            
-            # Set ownership and context
+            [ ! -L "$full_path" ] && ln -sf "$target" "$full_path"
             chown -h "$uid:$gid" "$full_path" 2>/dev/null || true
             [ -n "$context" ] && chcon -h "$context" "$full_path" 2>/dev/null || true
         done < "${REPACK_INFO}/symlink_info.txt"
     fi
     
-    # Get filesystem counts
+    # Get counts for progress display
     DIR_COUNT=$(find "$1" -type d | wc -l)
     FILE_COUNT=$(find "$1" -type f | wc -l)
-    
     echo -e "${BLUE}├─ Found ${BOLD}$DIR_COUNT${RESET}${BLUE} directories${RESET}"
     echo -e "${BLUE}└─ Found ${BOLD}$FILE_COUNT${RESET}${BLUE} files${RESET}\n"
 
-    # First process directories
+    # Process directories
     echo -e "${BLUE}Processing directory structure...${RESET}"
     processed=0
     spin=0
     spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
 
-    # Create list of new directories by comparing with fs-config
     find "$1" -type d | while read -r item; do
         processed=$((processed + 1))
         percentage=$((processed * 100 / DIR_COUNT))
-        
         rel_path=${item#$1}
         [ -z "$rel_path" ] && rel_path="/"
         
-        # Check if directory exists in original config
-        stored_attrs=$(grep "^$rel_path " "$FS_CONFIG_FILE" 2>/dev/null | cut -d' ' -f2-)
-        stored_context=$(grep "^$rel_path " "$FILE_CONTEXTS_FILE" 2>/dev/null | cut -d' ' -f2-)
-        
-        if [ -n "$stored_attrs" ]; then
-            # Restore original attributes
+        # Try to find matching attributes
+        if ! grep -q "^$rel_path " "$FS_CONFIG_FILE" 2>/dev/null; then
+            # New directory - find matching pattern
+            pattern=$(find_matching_pattern "$rel_path" "dir")
+            if [ -n "$pattern" ]; then
+                uid=$(echo "$pattern" | awk '{print $2}')
+                gid=$(echo "$pattern" | awk '{print $3}')
+                mode=$(echo "$pattern" | awk '{print $4}')
+            else
+                # Default fallback
+                uid=0; gid=0; mode=755
+            fi
+            chown "$uid:$gid" "$item" 2>/dev/null || true
+            chmod "$mode" "$item" 2>/dev/null || true
+            
+            # Try to find matching context
+            context=$(grep "^$(dirname "$rel_path") " "$FILE_CONTEXTS_FILE" | cut -d' ' -f2- | head -n1)
+            [ -n "$context" ] && chcon "$context" "$item" 2>/dev/null || true
+        else
+            # Existing directory - restore original attributes
+            stored_attrs=$(grep "^$rel_path " "$FS_CONFIG_FILE" | cut -d' ' -f2-)
+            stored_context=$(grep "^$rel_path " "$FILE_CONTEXTS_FILE" | cut -d' ' -f2-)
+            
             uid=$(echo "$stored_attrs" | awk '{print $1}')
             gid=$(echo "$stored_attrs" | awk '{print $2}')
             mode=$(echo "$stored_attrs" | awk '{print $3}')
+            
             chown "$uid:$gid" "$item" 2>/dev/null || true
             chmod "$mode" "$item" 2>/dev/null || true
-        else
-            # New directory - apply default permissions from parent
-            parent_dir=$(dirname "$rel_path")
-            parent_attrs=$(grep "^$parent_dir " "$FS_CONFIG_FILE" 2>/dev/null | cut -d' ' -f2-)
-            parent_context=$(grep "^$parent_dir " "$FILE_CONTEXTS_FILE" 2>/dev/null | cut -d' ' -f2-)
-            
-            if [ -n "$parent_attrs" ]; then
-                uid=$(echo "$parent_attrs" | awk '{print $1}')
-                gid=$(echo "$parent_attrs" | awk '{print $2}')
-                chown "$uid:$gid" "$item" 2>/dev/null || true
-                chmod 755 "$item" 2>/dev/null || true
-            fi
-            [ -n "$parent_context" ] && chcon "$parent_context" "$item" 2>/dev/null || true
+            [ -n "$stored_context" ] && chcon "$stored_context" "$item" 2>/dev/null || true
         fi
-        
-        [ -n "$stored_context" ] && chcon "$stored_context" "$item" 2>/dev/null || true
         
         echo -ne "\r\033[K${BLUE}[${spinner[$((spin++))]}] Mapping contexts: ${percentage}% (${processed}/${DIR_COUNT})${RESET}"
         spin=$((spin % 10))
     done
     echo -e "\r\033[K${GREEN}[✓] Directory attributes mapped${RESET}\n"
 
-    # Then process files
+    # Process files
     echo -e "${BLUE}Processing file permissions...${RESET}"
     processed=0
     spin=0
@@ -176,35 +187,42 @@ restore_attributes() {
     find "$1" -type f | while read -r item; do
         processed=$((processed + 1))
         percentage=$((processed * 100 / FILE_COUNT))
-        
         rel_path=${item#$1}
-        stored_attrs=$(grep "^$rel_path " "$FS_CONFIG_FILE" 2>/dev/null | cut -d' ' -f2-)
-        stored_context=$(grep "^$rel_path " "$FILE_CONTEXTS_FILE" 2>/dev/null | cut -d' ' -f2-)
         
-        if [ -n "$stored_attrs" ]; then
-            # Restore original attributes
+        # Try to find matching attributes
+        if ! grep -q "^$rel_path " "$FS_CONFIG_FILE" 2>/dev/null; then
+            # New file - find matching pattern
+            pattern=$(find_matching_pattern "$rel_path" "file")
+            if [ -n "$pattern" ]; then
+                uid=$(echo "$pattern" | awk '{print $2}')
+                gid=$(echo "$pattern" | awk '{print $3}')
+                mode=$(echo "$pattern" | awk '{print $4}')
+            else
+                # Default fallback
+                uid=0; gid=0; mode=644
+            fi
+            chown "$uid:$gid" "$item" 2>/dev/null || true
+            chmod "$mode" "$item" 2>/dev/null || true
+            
+            # Try to find matching context
+            ext=$(echo "$rel_path" | grep -o '\.[^.]*$' || echo "")
+            if [ -n "$ext" ]; then
+                context=$(grep "$ext" "$FILE_CONTEXTS_FILE" | head -n1 | cut -d' ' -f2-)
+                [ -n "$context" ] && chcon "$context" "$item" 2>/dev/null || true
+            fi
+        else
+            # Existing file - restore original attributes
+            stored_attrs=$(grep "^$rel_path " "$FS_CONFIG_FILE" | cut -d' ' -f2-)
+            stored_context=$(grep "^$rel_path " "$FILE_CONTEXTS_FILE" | cut -d' ' -f2-)
+            
             uid=$(echo "$stored_attrs" | awk '{print $1}')
             gid=$(echo "$stored_attrs" | awk '{print $2}')
             mode=$(echo "$stored_attrs" | awk '{print $3}')
+            
             chown "$uid:$gid" "$item" 2>/dev/null || true
             chmod "$mode" "$item" 2>/dev/null || true
-        else
-            # New file - apply default permissions from parent
-            parent_dir=$(dirname "$rel_path")
-            parent_attrs=$(grep "^$parent_dir " "$FS_CONFIG_FILE" 2>/dev/null | cut -d' ' -f2-)
-            parent_context=$(grep "^$parent_dir " "$FILE_CONTEXTS_FILE" 2>/dev/null | cut -d' ' -f2-)
-            
-            if [ -n "$parent_attrs" ]; then
-                uid=$(echo "$parent_attrs" | awk '{print $1}')
-                gid=$(echo "$parent_attrs" | awk '{print $2}')
-                chown "$uid:$gid" "$item" 2>/dev/null || true
-                chmod 644 "$item" 2>/dev/null || true
-            fi
-            [ -n "$parent_context" ] && chcon "$parent_context" "$item" 2>/dev/null || true
+            [ -n "$stored_context" ] && chcon "$stored_context" "$item" 2>/dev/null || true
         fi
-        
-        # Always try to restore original context if available
-        [ -n "$stored_context" ] && chcon "$stored_context" "$item" 2>/dev/null || true
 
         echo -ne "\r\033[K${BLUE}[${spinner[$((spin++))]}] Restoring contexts: ${percentage}% (${processed}/${FILE_COUNT})${RESET}"
         spin=$((spin % 10))
@@ -267,6 +285,12 @@ show_copy_progress() {
     echo -e "\r\033[K${GREEN}[✓] Files copied to work directory${RESET}\n"
 }
 
+remove_repack_info() {
+    local target_dir="$1"
+    rm -rf "${target_dir}/.repack_info" 2>/dev/null
+    rm -rf "${target_dir}/fs-config.txt" 2>/dev/null
+}
+
 prepare_working_directory() {
     echo -e "\n${BLUE}Preparing working directory...${RESET}"
     mkdir -p "$TEMP_ROOT"
@@ -281,97 +305,176 @@ prepare_working_directory() {
     
     if [ $? -ne 0 ]; then
         echo -e "${RED}Error: Failed to copy files with attributes${RESET}"
-        cleanup
+        cleanup ERROR
     fi
     
     verify_modifications "$WORK_DIR"
     restore_attributes "$WORK_DIR"
+    remove_repack_info "$WORK_DIR"
+}
+
+create_ext4_image_quiet() {
+    local blocks="$1"
+    local output="$2"
+    local mount_point="$3"
+
+    # Create raw image quietly
+    dd if=/dev/zero of="$output" bs=4096 count="$blocks" status=none
+
+    # Format ext4 quietly
+    mkfs.ext4 -q \
+        -O ext_attr,dir_index,filetype,extent,sparse_super,large_file,huge_file,uninit_bg,dir_nlink,extra_isize \
+        -O ^has_journal,^resize_inode,^64bit,^flex_bg,^metadata_csum "$output"
+
+    mkdir -p "$mount_point"
+    mount -o loop,rw "$output" "$mount_point" 2>/dev/null
 }
 
 # Start repacking process with better visuals
-echo -e "\n${BLUE}${BOLD}Starting EROFS repacking process...${RESET}"
+echo -e "\n${BLUE}${BOLD}Starting repacking process...${RESET}"
 echo -e "${BLUE}┌─ Source directory: ${BOLD}$EXTRACT_DIR${RESET}"
 echo -e "${BLUE}└─ Target image: ${BOLD}$OUTPUT_IMG${RESET}\n"
 
-prepare_working_directory
+# Add filesystem selection before any operations
+echo -e "\n${BLUE}${BOLD}Select filesystem type:${RESET}"
+echo -e "1. EROFS"
+echo -e "2. EXT4"
+read -p "Enter your choice [1-2]: " FS_CHOICE
 
-# Ask for compression method
-echo -e "\n${BLUE}${BOLD}Select compression method:${RESET}"
-echo -e "1. none (default)"
-echo -e "2. lz4"
-echo -e "3. lz4hc (level 0-12, default 9)"
-echo -e "4. deflate (level 0-9, default 1)"
-read -p "Enter your choice [1-4]: " COMP_CHOICE
+case $FS_CHOICE in
+    1)
+        # EROFS flow - prepare working directory first
+        prepare_working_directory
+        
+        echo -e "\n${BLUE}${BOLD}Select compression method:${RESET}"
+        echo -e "1. none (default)"
+        echo -e "2. lz4"
+        echo -e "3. lz4hc (level 0-12, default 9)"
+        echo -e "4. deflate (level 0-9, default 1)"
+        read -p "Enter your choice [1-4]: " COMP_CHOICE
 
-case $COMP_CHOICE in
-  2)
-    COMPRESSION="-zlz4"
-    ;;
-  3)
-    echo -e "\n${BLUE}${BOLD}Select LZ4HC compression level (0-12):${RESET}"
-    echo -e "Default: 9 (higher = better compression but slower)"
-    read -p "Enter compression level: " COMP_LEVEL
-    
-    if [[ "$COMP_LEVEL" =~ ^([0-9]|1[0-2])$ ]]; then
-      COMPRESSION="-zlz4hc,level=$COMP_LEVEL"
-    else
-      echo -e "${YELLOW}Invalid level. Using default level 9.${RESET}"
-      COMPRESSION="-zlz4hc"
-    fi
-    ;;
-  4)
-    echo -e "\n${BLUE}${BOLD}Select DEFLATE compression level (0-9):${RESET}"
-    echo -e "Default: 1 (higher = better compression but slower)"
-    read -p "Enter compression level: " COMP_LEVEL
-    
-    if [[ "$COMP_LEVEL" =~ ^[0-9]$ ]]; then
-      COMPRESSION="-zdeflate,level=$COMP_LEVEL"
-    else
-      echo -e "${YELLOW}Invalid level. Using default level 1.${RESET}"
-      COMPRESSION="-zdeflate"
-    fi
-    ;;
-  *)
-    COMPRESSION=""
-    echo -e "${BLUE}Using no compression.${RESET}"
-    ;;
+        case $COMP_CHOICE in
+          2)
+            COMPRESSION="-zlz4"
+            ;;
+          3)
+            echo -e "\n${BLUE}${BOLD}Select LZ4HC compression level (0-12):${RESET}"
+            echo -e "Default: 9 (higher = better compression but slower)"
+            read -p "Enter compression level: " COMP_LEVEL
+            
+            if [[ "$COMP_LEVEL" =~ ^([0-9]|1[0-2])$ ]]; then
+              COMPRESSION="-zlz4hc,level=$COMP_LEVEL"
+            else
+              echo -e "${YELLOW}Invalid level. Using default level 9.${RESET}"
+              COMPRESSION="-zlz4hc"
+            fi
+            ;;
+          4)
+            echo -e "\n${BLUE}${BOLD}Select DEFLATE compression level (0-9):${RESET}"
+            echo -e "Default: 1 (higher = better compression but slower)"
+            read -p "Enter compression level: " COMP_LEVEL
+            
+            if [[ "$COMP_LEVEL" =~ ^[0-9]$ ]]; then
+              COMPRESSION="-zdeflate,level=$COMP_LEVEL"
+            else
+              echo -e "${YELLOW}Invalid level. Using default level 1.${RESET}"
+              COMPRESSION="-zdeflate"
+            fi
+            ;;
+          *)
+            COMPRESSION=""
+            echo -e "${BLUE}Using no compression.${RESET}"
+            ;;
+        esac
+        
+        # Create the EROFS image with simplest command
+        MKFS_CMD="mkfs.erofs"
+        if [ -n "$COMPRESSION" ]; then
+            MKFS_CMD="$MKFS_CMD $COMPRESSION"
+        fi
+        MKFS_CMD="$MKFS_CMD $OUTPUT_IMG.tmp $WORK_DIR"
+
+        # Show the command
+        echo -e "\n${BLUE}Executing command:${RESET}"
+        echo -e "${BOLD}$MKFS_CMD${RESET}\n"
+
+        # Create the EROFS image
+        echo -e "${BLUE}Creating EROFS image... This may take some time.${RESET}\n"
+        eval $MKFS_CMD
+        
+        if [ $? -eq 0 ]; then
+            mv "$OUTPUT_IMG.tmp" "$OUTPUT_IMG"
+            echo -e "\n${GREEN}${BOLD}Successfully created EROFS image: $OUTPUT_IMG${RESET}"
+            echo -e "${BLUE}Image size: $(du -h "$OUTPUT_IMG" | cut -f1)${RESET}"
+        fi
+        ;;
+        
+    2)
+        # EXT4 flow
+        echo -e "\n${BLUE}Calculating image size...${RESET}"
+        INPUT_SIZE=$(du -sb "$EXTRACT_DIR" | cut -f1)
+        SIZE_WITH_OVERHEAD=$(echo "($INPUT_SIZE * 1.1 + 0.5)/1" | bc)
+        BLOCK_COUNT=$(echo "($SIZE_WITH_OVERHEAD + 4095) / 4096" | bc)
+        MOUNT_POINT="${TEMP_ROOT}/ext4_mount"
+        
+        # Create directories
+        mkdir -p "$TEMP_ROOT"
+        mkdir -p "$MOUNT_POINT"
+        
+        # Create and format image
+        echo -e "${BLUE}Creating ext4 image...${RESET}"
+        dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$BLOCK_COUNT" status=none
+        
+        mkfs.ext4 -q \
+            -O ext_attr,dir_index,filetype,extent,sparse_super,large_file,huge_file,uninit_bg,dir_nlink,extra_isize \
+            -O ^has_journal,^resize_inode,^64bit,^flex_bg,^metadata_csum "$OUTPUT_IMG"
+        
+        # Mount
+        echo -e "${BLUE}Mounting image...${RESET}"
+        mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+        
+        # Copy files
+        echo -e "\n${BLUE}Copying files and setting attributes...${RESET}"
+        (cd "$EXTRACT_DIR" && tar --selinux -cf - .) | (cd "$MOUNT_POINT" && tar --selinux -xf -) &
+        show_copy_progress "$EXTRACT_DIR" "$MOUNT_POINT"
+        wait $!
+        
+        # Verify and restore
+        verify_modifications "$MOUNT_POINT"
+        restore_attributes "$MOUNT_POINT"
+        remove_repack_info "$MOUNT_POINT"
+        
+        # Unmount
+        echo -e "${BLUE}Unmounting image...${RESET}"
+        sync >/dev/null 2>&1
+        umount "$MOUNT_POINT" >/dev/null 2>&1
+        
+        # Final filesystem check
+        e2fsck -yf "$OUTPUT_IMG" >/dev/null 2>&1
+        
+        # Set permissions and cleanup
+        [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"
+        rm -rf "$MOUNT_POINT" >/dev/null 2>&1
+        
+        echo -e "\n${GREEN}${BOLD}Successfully created EXT4 image: $OUTPUT_IMG${RESET}"
+        echo -e "${BLUE}Image size: $(du -h "$OUTPUT_IMG" | cut -f1)${RESET}"
+        exit 0
+        ;;
+        
+    *)
+        echo -e "${RED}Invalid choice. Exiting.${RESET}"
+        cleanup ERROR
+        exit 1
+        ;;
 esac
 
-# Create the EROFS image with simplest command
-MKFS_CMD="mkfs.erofs"
-if [ -n "$COMPRESSION" ]; then
-  MKFS_CMD="$MKFS_CMD $COMPRESSION"
-fi
-MKFS_CMD="$MKFS_CMD $OUTPUT_IMG.tmp $WORK_DIR"
-
-# Show the command
-echo -e "\n${BLUE}Executing command:${RESET}"
-echo -e "${BOLD}$MKFS_CMD${RESET}\n"
-
-# Create the EROFS image
-echo -e "${BLUE}Creating EROFS image... This may take some time.${RESET}\n"
-eval $MKFS_CMD
-
-# On success, move temp file to final location
-if [ $? -eq 0 ]; then
-    mv "$OUTPUT_IMG.tmp" "$OUTPUT_IMG"
-    echo -e "\n${GREEN}${BOLD}Successfully created EROFS image: $OUTPUT_IMG${RESET}"
-    echo -e "${BLUE}Image size: $(du -h "$OUTPUT_IMG" | cut -f1)${RESET}"
-    
-    # Transfer ownership back to actual user
-    if [ -n "$SUDO_USER" ]; then
-        chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"
-    fi
-
-    # Clear trap before normal exit
-    trap - INT TERM EXIT
-    cleanup
-else
-    echo -e "\n${RED}Error occurred during image creation.${RESET}"
-    cleanup
+# Transfer ownership back to actual user
+if [ -n "$SUDO_USER" ]; then
+    chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"
 fi
 
-# Clean up temporary files
+# Clear trap before normal exit
+trap - INT TERM EXIT
 cleanup
 
 echo -e "\n${GREEN}${BOLD}Done!${RESET}"
