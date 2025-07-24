@@ -57,8 +57,15 @@ WORK_DIR="${TEMP_ROOT}/${PARTITION_NAME}_work"
 
 cleanup() {
     echo -e "\n${YELLOW}Cleaning up temporary files...${RESET}"
+
+    # First unmount any mounted filesystems
+    if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+        sync
+        umount "$MOUNT_POINT" 2>/dev/null || umount -l "$MOUNT_POINT" 2>/dev/null
+    fi
+    
+    # Then remove temporary files    
     [ -d "$TEMP_ROOT" ] && rm -rf "$TEMP_ROOT"
-    # In case script is interrupted during image creation
     [ -f "$OUTPUT_IMG.tmp" ] && rm -f "$OUTPUT_IMG.tmp"
     echo -e "${GREEN}Cleanup completed.${RESET}"
     # Only exit with error if called from trap
@@ -409,23 +416,42 @@ case $FS_CHOICE in
         fi
         ;;
         
-    2)
+    2)    	
         # EXT4 flow
         echo -e "\n${BLUE}Calculating image size...${RESET}"
         INPUT_SIZE=$(du -sb "$EXTRACT_DIR" | cut -f1)
-        SIZE_WITH_OVERHEAD=$(echo "($INPUT_SIZE * 1.1 + 0.5)/1" | bc)
-        BLOCK_COUNT=$(echo "($SIZE_WITH_OVERHEAD + 4095) / 4096" | bc)
+
+        # Minimum size 64MB, plus input size times 1.3
+        MIN_SIZE=$((64 * 1024 * 1024))  # 64MB in bytes
+        CALCULATED_SIZE=$(echo "($INPUT_SIZE * 1.3)/1" | bc)
+        
+        # Take the larger of MIN_SIZE and CALCULATED_SIZE
+        if [ $CALCULATED_SIZE -lt $MIN_SIZE ]; then
+            SIZE_WITH_OVERHEAD=$MIN_SIZE
+        else
+            SIZE_WITH_OVERHEAD=$CALCULATED_SIZE
+        fi
+        
+        # Add 32MB extra padding and align to 4K blocks
+        SIZE_WITH_OVERHEAD=$((SIZE_WITH_OVERHEAD + (32 * 1024 * 1024)))
+        BLOCK_COUNT=$(((SIZE_WITH_OVERHEAD + 4095) / 4096))
+        
+        echo -e "${BLUE}Required space: $(numfmt --to=iec-i --suffix=B $SIZE_WITH_OVERHEAD)${RESET}"
+        echo -e "${BLUE}Block count: $BLOCK_COUNT${RESET}"        
+
+
         MOUNT_POINT="${TEMP_ROOT}/ext4_mount"
         
         # Create directories
         mkdir -p "$TEMP_ROOT"
         mkdir -p "$MOUNT_POINT"
         
-        # Create and format image
+        # Create and format image with more inodes and larger size
         echo -e "${BLUE}Creating ext4 image...${RESET}"
         dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$BLOCK_COUNT" status=none
         
-        mkfs.ext4 -q \
+        # Increase inode count significantly and reserve less space
+        mkfs.ext4 -q -N 100000 -m 0 \
             -O ext_attr,dir_index,filetype,extent,sparse_super,large_file,huge_file,uninit_bg,dir_nlink,extra_isize \
             -O ^has_journal,^resize_inode,^64bit,^flex_bg,^metadata_csum "$OUTPUT_IMG"
         
@@ -455,9 +481,13 @@ case $FS_CHOICE in
         # Set permissions and cleanup
         [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"
         rm -rf "$MOUNT_POINT" >/dev/null 2>&1
+
+        # Get actual image size using stat for Linux
+        ACTUAL_SIZE=$(stat -c %s "$OUTPUT_IMG" | numfmt --to=iec-i --suffix=B)        
         
         echo -e "\n${GREEN}${BOLD}Successfully created EXT4 image: $OUTPUT_IMG${RESET}"
-        echo -e "${BLUE}Image size: $(du -h "$OUTPUT_IMG" | cut -f1)${RESET}"
+        echo -e "${BLUE}Total image size: ${ACTUAL_SIZE}${RESET}"
+        echo -e "${BLUE}Used space: $(du -h "$OUTPUT_IMG" | cut -f1)${RESET}"
         exit 0
         ;;
         
