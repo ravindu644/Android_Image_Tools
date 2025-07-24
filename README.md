@@ -38,7 +38,7 @@ sudo ./unpack-erofs-script.sh imagename.img
 
 For f2fs support: `sudo modprobe f2fs`
 
-**Repack as erofs:**
+**Repack as erofs/ext4:**
 ```bash
 sudo ./repack-erofs-script.sh /path/to/extracted_imagename
 ```
