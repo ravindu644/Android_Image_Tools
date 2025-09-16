@@ -117,7 +117,9 @@ mkdir -p "$REPACK_INFO"
 
 # Try to mount the image
 echo -e "Attempting to mount ${BOLD}$IMAGE_FILE${RESET}..."
-if ! mount -o loop,ro "$IMAGE_FILE" "$MOUNT_DIR" 2>/dev/null; then
+
+# First, try a read-write mount to handle journal recovery, then immediately remount as read-only.
+if ! (mount -o loop "$IMAGE_FILE" "$MOUNT_DIR" 2>/dev/null && mount -o remount,ro "$MOUNT_DIR" 2>/dev/null); then
   echo -e "${YELLOW}Direct mounting failed. Trying to convert image...${RESET}"
   
   # Try to determine image format
@@ -141,7 +143,7 @@ if ! mount -o loop,ro "$IMAGE_FILE" "$MOUNT_DIR" 2>/dev/null; then
     fi
     
     echo -e "${BLUE}Attempting to mount raw image...${RESET}"
-    if ! mount -o loop,ro "$RAW_IMAGE" "$MOUNT_DIR" 2>/dev/null; then
+    if ! (mount -o loop "$RAW_IMAGE" "$MOUNT_DIR" 2>/dev/null && mount -o remount,ro "$MOUNT_DIR" 2>/dev/null); then
       echo -e "${RED}Failed to mount even after conversion. No luck with this image.${RESET}"
       exit 1
     fi
