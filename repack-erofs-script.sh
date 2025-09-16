@@ -68,12 +68,10 @@ cleanup() {
     [ -d "$TEMP_ROOT" ] && rm -rf "$TEMP_ROOT"
     [ -f "$OUTPUT_IMG.tmp" ] && rm -f "$OUTPUT_IMG.tmp"
     echo -e "${GREEN}Cleanup completed.${RESET}"
-    # Only exit with error if called from trap
-    [ "$1" = "ERROR" ] && exit 1 || exit 0
 }
 
-# Register cleanup for interrupts and errors
-trap 'cleanup ERROR' INT TERM EXIT
+# Register cleanup for interrupts and errors. The trap will handle the exit.
+trap 'cleanup; exit 1' INT TERM EXIT
 
 # Check if repack info exists
 if [ ! -d "$REPACK_INFO" ]; then
@@ -337,6 +335,20 @@ create_ext4_image_quiet() {
     mount -o loop,rw "$output" "$mount_point" 2>/dev/null
 }
 
+# Function to get original filesystem parameters (robust and universal)
+get_fs_param() {
+    local image_file="$1"
+    local param="$2"
+    if [ ! -f "$image_file" ]; then
+        echo ""
+        return
+    fi
+    # This robustly extracts the value after the colon, trims whitespace,
+    # and takes the first "word", which is the actual numerical value or keyword.
+    # It correctly handles lines like "Reserved blocks uid: 0 (user root)".
+    tune2fs -l "$image_file" | grep -E "^${param}:" | awk -F':' '{print $2}' | awk '{print $1}'
+}
+
 # Start repacking process with better visuals
 echo -e "\n${BLUE}${BOLD}Starting repacking process...${RESET}"
 echo -e "${BLUE}┌─ Source directory: ${BOLD}$EXTRACT_DIR${RESET}"
@@ -416,84 +428,102 @@ case $FS_CHOICE in
         fi
         ;;
         
-    2)    	
+    2)
         # EXT4 flow
-        echo -e "\n${BLUE}Calculating image size...${RESET}"
-        INPUT_SIZE=$(du -sb "$EXTRACT_DIR" | cut -f1)
-
-        # Minimum size 64MB, plus input size times 1.3
-        MIN_SIZE=$((64 * 1024 * 1024))  # 64MB in bytes
-        CALCULATED_SIZE=$(echo "($INPUT_SIZE * 1.3)/1" | bc)
-        
-        # Take the larger of MIN_SIZE and CALCULATED_SIZE
-        if [ $CALCULATED_SIZE -lt $MIN_SIZE ]; then
-            SIZE_WITH_OVERHEAD=$MIN_SIZE
-        else
-            SIZE_WITH_OVERHEAD=$CALCULATED_SIZE
-        fi
-        
-        # Add 32MB extra padding and align to 4K blocks
-        SIZE_WITH_OVERHEAD=$((SIZE_WITH_OVERHEAD + (32 * 1024 * 1024)))
-        BLOCK_COUNT=$(((SIZE_WITH_OVERHEAD + 4095) / 4096))
-        
-        echo -e "${BLUE}Required space: $(numfmt --to=iec-i --suffix=B $SIZE_WITH_OVERHEAD)${RESET}"
-        echo -e "${BLUE}Block count: $BLOCK_COUNT${RESET}"        
-
-
         MOUNT_POINT="${TEMP_ROOT}/ext4_mount"
-        
-        # Create directories
-        mkdir -p "$TEMP_ROOT"
         mkdir -p "$MOUNT_POINT"
-        
-        # Create and format image with more inodes and larger size
-        echo -e "${BLUE}Creating ext4 image...${RESET}"
-        dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$BLOCK_COUNT" status=none
-        
-        # Increase inode count significantly and reserve less space
-        mkfs.ext4 -q -N 100000 -m 0 \
-            -O ext_attr,dir_index,filetype,extent,sparse_super,large_file,huge_file,uninit_bg,dir_nlink,extra_isize \
-            -O ^has_journal,^resize_inode,^64bit,^flex_bg,^metadata_csum "$OUTPUT_IMG"
-        
-        # Mount
-        echo -e "${BLUE}Mounting image...${RESET}"
-        mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
-        
-        # Copy files
-        echo -e "\n${BLUE}Copying files and setting attributes...${RESET}"
+
+        echo -e "\n${BLUE}${BOLD}Select EXT4 Repack Mode:${RESET}"
+        echo -e "1. Strict (clone original image structure exactly - for repair)"
+        echo -e "2. Flexible (auto-resize if content is larger - for customization)"
+        read -p "Enter your choice [1-2]: " REPACK_MODE
+
+        ORIGINAL_IMAGE=$(grep "SOURCE_IMAGE" "${REPACK_INFO}/metadata.txt" | cut -d'=' -f2)
+
+        if [ "$REPACK_MODE" == "1" ] && [ ! -f "$ORIGINAL_IMAGE" ]; then
+            echo -e "${RED}Error: Strict mode requires the original image '$ORIGINAL_IMAGE' to be present.${RESET}"
+            exit 1
+        fi
+
+        if [ -f "$ORIGINAL_IMAGE" ]; then
+            # --- IDEAL PATH: Original image exists ---
+            echo -e "\n${BLUE}Original image found. Reading metadata...${RESET}"
+            ORIGINAL_BLOCK_COUNT=$(get_fs_param "$ORIGINAL_IMAGE" "Block count")
+            
+            if [ "$REPACK_MODE" == "1" ]; then
+                echo -e "${YELLOW}Strict mode selected. Cloning original filesystem structure...${RESET}"
+                cp "$ORIGINAL_IMAGE" "$OUTPUT_IMG"
+                mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+                (cd "$MOUNT_POINT" && find . -mindepth 1 ! -name 'lost+found' -delete)
+            else # Flexible mode
+                echo -e "${YELLOW}Flexible mode selected. Analyzing content size...${RESET}"
+                ORIGINAL_CAPACITY=$((ORIGINAL_BLOCK_COUNT * 4096))
+                CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
+
+                if [ "$CURRENT_CONTENT_SIZE" -le "$ORIGINAL_CAPACITY" ]; then
+                    echo -e "${GREEN}Content fits. Cloning original structure for efficiency.${RESET}"
+                    cp "$ORIGINAL_IMAGE" "$OUTPUT_IMG"
+                    mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+                    (cd "$MOUNT_POINT" && find . -mindepth 1 ! -name 'lost+found' -delete)
+                else
+                    echo -e "${YELLOW}Content is larger. Creating new, larger image with original attributes...${RESET}"
+                    UUID=$(get_fs_param "$ORIGINAL_IMAGE" "Filesystem UUID")
+                    VOLUME_NAME=$(get_fs_param "$ORIGINAL_IMAGE" "Filesystem volume name")
+                    INODE_SIZE=$(get_fs_param "$ORIGINAL_IMAGE" "Inode size")
+                    FEATURES=$(tune2fs -l "$ORIGINAL_IMAGE" | grep "Filesystem features:" | cut -d':' -f2 | xargs | sed 's/ /,/g')
+                    HASH_SEED=$(get_fs_param "$ORIGINAL_IMAGE" "Directory Hash Seed")
+                    SIZE_WITH_OVERHEAD=$(echo "($CURRENT_CONTENT_SIZE * 1.25) + (32 * 1024 * 1024)" | bc)
+                    BLOCK_COUNT=$(echo "($SIZE_WITH_OVERHEAD + 4095) / 4096" | bc)
+                    
+                    echo -e "${BLUE}New Block count: $BLOCK_COUNT${RESET}"
+                    dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$BLOCK_COUNT" status=none
+                    mkfs.ext4 -q -b 4096 -I "$INODE_SIZE" -U "$UUID" -L "$VOLUME_NAME" -O "$FEATURES" -E "hash_seed=$HASH_SEED" "$OUTPUT_IMG"
+                    mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+                fi
+            fi
+        else
+            # --- FALLBACK PATH: Original image is missing (only for flexible mode) ---
+            if [ "$REPACK_MODE" == "2" ]; then
+                echo -e "\n${YELLOW}Warning: Original image not found. Creating a generic filesystem with estimated size.${RESET}"
+                CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
+                SIZE_WITH_OVERHEAD=$(echo "($CURRENT_CONTENT_SIZE * 1.25) + (32 * 1024 * 1024)" | bc)
+                BLOCK_COUNT=$(echo "($SIZE_WITH_OVERHEAD + 4095) / 4096" | bc)
+                
+                echo -e "${BLUE}Content size: $(numfmt --to=iec-i --suffix=B $CURRENT_CONTENT_SIZE)${RESET}"
+                echo -e "${BLUE}Calculated Block count: $BLOCK_COUNT${RESET}"
+
+                dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$BLOCK_COUNT" status=none
+                mkfs.ext4 -q "$OUTPUT_IMG"
+                mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+            else
+                echo -e "${RED}Error: Original image not found, cannot proceed in Strict mode.${RESET}"
+                exit 1
+            fi
+        fi
+
+        # --- Common part for all EXT4 paths: Refill and Finalize ---
+        echo -e "\n${BLUE}Copying files to image...${RESET}"
         (cd "$EXTRACT_DIR" && tar --selinux -cf - .) | (cd "$MOUNT_POINT" && tar --selinux -xf -) &
         show_copy_progress "$EXTRACT_DIR" "$MOUNT_POINT"
         wait $!
         
-        # Verify and restore
         verify_modifications "$MOUNT_POINT"
         restore_attributes "$MOUNT_POINT"
         remove_repack_info "$MOUNT_POINT"
         
-        # Unmount
         echo -e "${BLUE}Unmounting image...${RESET}"
-        sync >/dev/null 2>&1
-        umount "$MOUNT_POINT" >/dev/null 2>&1
+        sync && umount "$MOUNT_POINT"
         
-        # Final filesystem check
         e2fsck -yf "$OUTPUT_IMG" >/dev/null 2>&1
-        
-        # Set permissions and cleanup
         [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"
-        rm -rf "$MOUNT_POINT" >/dev/null 2>&1
 
-        # Get actual image size using stat for Linux
-        ACTUAL_SIZE=$(stat -c %s "$OUTPUT_IMG" | numfmt --to=iec-i --suffix=B)        
-        
         echo -e "\n${GREEN}${BOLD}Successfully created EXT4 image: $OUTPUT_IMG${RESET}"
-        echo -e "${BLUE}Total image size: ${ACTUAL_SIZE}${RESET}"
-        echo -e "${BLUE}Used space: $(du -h "$OUTPUT_IMG" | cut -f1)${RESET}"
-        exit 0
+        echo -e "${BLUE}Image size: $(stat -c %s "$OUTPUT_IMG" | numfmt --to=iec-i --suffix=B)${RESET}"
+        
         ;;
         
     *)
         echo -e "${RED}Invalid choice. Exiting.${RESET}"
-        cleanup ERROR
         exit 1
         ;;
 esac
@@ -503,7 +533,7 @@ if [ -n "$SUDO_USER" ]; then
     chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"
 fi
 
-# Clear trap before normal exit
+# Disable the trap for a clean, successful exit
 trap - INT TERM EXIT
 cleanup
 
