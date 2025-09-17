@@ -97,6 +97,29 @@ cleanup() {
   echo -e "Cleanup completed."
 }
 
+# Function to explicitly handle 'needs journal recovery' state
+handle_journal_recovery() {
+    local image_file="$1"
+    # Silently check if the state exists using the 'file' command.
+    if file "$image_file" 2>/dev/null | grep -q "needs journal recovery"; then
+        echo -e "${YELLOW}${BOLD}Warning: Filesystem needs journal recovery.${RESET}\n"
+
+        # when e2fsck returns 1 (which means success with corrections).
+        if e2fsck -fy "$image_file" >/dev/null 2>&1; then
+            echo -e "${GREEN}${BOLD}[✓] Journal replayed successfully. Filesystem is clean.${RESET}"
+        else
+            # Exit code was non-zero. We must check if it was a success code (1 or 2).
+            local exit_code=$?
+            if [ $exit_code -le 2 ]; then
+                echo -e "${GREEN}${BOLD}[✓] Journal replayed successfully. Filesystem is clean.${RESET}\n"
+            else
+                echo -e "${RED}${BOLD}Error: Failed to replay journal. The image may be corrupt (e2fsck exit code: $exit_code).${RESET}"
+                exit 1
+            fi
+        fi
+    fi
+}
+
 # Function to detect and disable the 'shared_blocks' feature on ext images
 handle_shared_blocks() {
     local image_file="$1"
@@ -133,7 +156,8 @@ fi
 mkdir -p "$EXTRACT_DIR"
 mkdir -p "$REPACK_INFO"
 
-# Handle special cases like 'shared_blocks' before attempting to mount
+# Handle special cases like journal recovery and 'shared_blocks' before attempting to mount
+handle_journal_recovery "$IMAGE_FILE"
 handle_shared_blocks "$IMAGE_FILE"
 
 # Try to mount the image
