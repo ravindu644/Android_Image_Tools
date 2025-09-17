@@ -97,6 +97,24 @@ cleanup() {
   echo -e "Cleanup completed."
 }
 
+# Function to detect and disable the 'shared_blocks' feature on ext images
+handle_shared_blocks() {
+    local image_file="$1"
+    # Silently check if the feature exists. This is the main condition.
+    if tune2fs -l "$image_file" 2>/dev/null | grep -q "shared_blocks"; then
+        echo -e "\n${YELLOW}${BOLD}Warning: Incompatible 'shared_blocks' feature detected.${RESET}\n"
+        
+        # Use the correct e2fsck command to unshare the blocks. Suppress verbose output.
+        if e2fsck -E unshare_blocks -fy "$image_file" >/dev/null 2>&1; then
+            e2fsck -fy "$image_file" >/dev/null 2>&1
+            echo -e "${GREEN}${BOLD}[✓] 'shared_blocks' feature disabled and filesystem repaired successfully.${RESET}\n"
+        else
+            echo -e "${RED}${BOLD}Error: Failed to unshare blocks. The image may be corrupt.${RESET}"
+            exit 1
+        fi
+    fi
+}
+
 # Register cleanup function to run on script exit or interrupt
 trap cleanup EXIT INT TERM
 
@@ -109,11 +127,14 @@ mkdir -p "$MOUNT_DIR"
 
 # Create extraction and repack info directories
 if [ -d "$EXTRACT_DIR" ]; then
-  echo -e "${YELLOW}Removing existing extraction directory: ${EXTRACT_DIR}${RESET}"
+  echo -e "${YELLOW}Removing existing extraction directory: ${EXTRACT_DIR}${RESET}\n"
   rm -rf "$EXTRACT_DIR"
 fi
 mkdir -p "$EXTRACT_DIR"
 mkdir -p "$REPACK_INFO"
+
+# Handle special cases like 'shared_blocks' before attempting to mount
+handle_shared_blocks "$IMAGE_FILE"
 
 # Try to mount the image
 echo -e "Attempting to mount ${BOLD}$IMAGE_FILE${RESET}..."
