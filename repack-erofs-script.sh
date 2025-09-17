@@ -440,23 +440,29 @@ case $FS_CHOICE in
 
         ORIGINAL_IMAGE=$(grep "SOURCE_IMAGE" "${REPACK_INFO}/metadata.txt" | cut -d'=' -f2)
 
-        if [ "$REPACK_MODE" == "1" ] && [ ! -f "$ORIGINAL_IMAGE" ]; then
-            echo -e "${RED}Error: Strict mode requires the original image '$ORIGINAL_IMAGE' to be present.${RESET}"
-            exit 1
-        fi
+        # --- STRICT MODE LOGIC ---
 
-        if [ -f "$ORIGINAL_IMAGE" ]; then
-            # --- IDEAL PATH: Original image exists ---
-            echo -e "\n${BLUE}Original image found. Reading metadata...${RESET}"
-            ORIGINAL_BLOCK_COUNT=$(get_fs_param "$ORIGINAL_IMAGE" "Block count")
+        if [ "$REPACK_MODE" == "1" ]; then
+            echo -e "\n${YELLOW}${BOLD}Strict mode selected. Verifying original image...${RESET}"
+            if [ ! -f "$ORIGINAL_IMAGE" ]; then
+                echo -e "\n${RED}${BOLD}Error: Strict mode requires the original image '$ORIGINAL_IMAGE' to be present.${RESET}"
+                exit 1
+            fi
             
-            if [ "$REPACK_MODE" == "1" ]; then
-                echo -e "${YELLOW}Strict mode selected. Cloning original filesystem structure...${RESET}"
-                cp "$ORIGINAL_IMAGE" "$OUTPUT_IMG"
-                mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
-                (cd "$MOUNT_POINT" && find . -mindepth 1 ! -name 'lost+found' -delete)
-            else # Flexible mode
-                echo -e "${YELLOW}Flexible mode selected. Analyzing content size...${RESET}"
+            echo -e "${GREEN}Original image found. Cloning filesystem structure...${RESET}"
+            cp "$ORIGINAL_IMAGE" "$OUTPUT_IMG"
+            mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+            (cd "$MOUNT_POINT" && find . -mindepth 1 ! -name 'lost+found' -delete)
+        
+        # --- FLEXIBLE MODE LOGIC ---
+
+        else
+            echo -e "\n${YELLOW}${BOLD}Flexible mode selected. Analyzing source...${RESET}"
+            if [ -f "$ORIGINAL_IMAGE" ]; then
+
+                # --- Ideal Flexible Path: Original exists ---
+                echo -e "${BLUE}Original image found. Analyzing content size...${RESET}"
+                ORIGINAL_BLOCK_COUNT=$(get_fs_param "$ORIGINAL_IMAGE" "Block count")
                 ORIGINAL_CAPACITY=$((ORIGINAL_BLOCK_COUNT * 4096))
                 CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
 
@@ -465,13 +471,16 @@ case $FS_CHOICE in
                     cp "$ORIGINAL_IMAGE" "$OUTPUT_IMG"
                     mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
                     (cd "$MOUNT_POINT" && find . -mindepth 1 ! -name 'lost+found' -delete)
+
                 else
-                    echo -e "${YELLOW}Content is larger. Creating new, larger image with original attributes...${RESET}"
+                    echo -e "${YELLOW}Content is larger. Creating new image with original attributes as blueprint...${RESET}"
+                    # Read all parameters for the new, larger image
                     UUID=$(get_fs_param "$ORIGINAL_IMAGE" "Filesystem UUID")
                     VOLUME_NAME=$(get_fs_param "$ORIGINAL_IMAGE" "Filesystem volume name")
                     INODE_SIZE=$(get_fs_param "$ORIGINAL_IMAGE" "Inode size")
                     FEATURES=$(tune2fs -l "$ORIGINAL_IMAGE" | grep "Filesystem features:" | cut -d':' -f2 | xargs | sed 's/ /,/g')
                     HASH_SEED=$(get_fs_param "$ORIGINAL_IMAGE" "Directory Hash Seed")
+                    
                     SIZE_WITH_OVERHEAD=$(echo "($CURRENT_CONTENT_SIZE * 1.25) + (32 * 1024 * 1024)" | bc)
                     BLOCK_COUNT=$(echo "($SIZE_WITH_OVERHEAD + 4095) / 4096" | bc)
                     
@@ -479,12 +488,12 @@ case $FS_CHOICE in
                     dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$BLOCK_COUNT" status=none
                     mkfs.ext4 -q -b 4096 -I "$INODE_SIZE" -U "$UUID" -L "$VOLUME_NAME" -O "$FEATURES" -E "hash_seed=$HASH_SEED" "$OUTPUT_IMG"
                     mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+
                 fi
-            fi
-        else
-            # --- FALLBACK PATH: Original image is missing (only for flexible mode) ---
-            if [ "$REPACK_MODE" == "2" ]; then
-                echo -e "\n${YELLOW}Warning: Original image not found. Creating a generic filesystem with estimated size.${RESET}"
+
+            else
+                # --- Fallback Flexible Path: Original is missing ---
+                echo -e "\n${YELLOW}Warning: Original image not found. Creating a generic filesystem with estimated size.${RESET}\n"
                 CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
                 SIZE_WITH_OVERHEAD=$(echo "($CURRENT_CONTENT_SIZE * 1.25) + (32 * 1024 * 1024)" | bc)
                 BLOCK_COUNT=$(echo "($SIZE_WITH_OVERHEAD + 4095) / 4096" | bc)
@@ -495,10 +504,9 @@ case $FS_CHOICE in
                 dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$BLOCK_COUNT" status=none
                 mkfs.ext4 -q "$OUTPUT_IMG"
                 mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
-            else
-                echo -e "${RED}Error: Original image not found, cannot proceed in Strict mode.${RESET}"
-                exit 1
+
             fi
+            
         fi
 
         # --- Common part for all EXT4 paths: Refill and Finalize ---
@@ -519,7 +527,7 @@ case $FS_CHOICE in
 
         echo -e "\n${GREEN}${BOLD}Successfully created EXT4 image: $OUTPUT_IMG${RESET}"
         echo -e "${BLUE}Image size: $(stat -c %s "$OUTPUT_IMG" | numfmt --to=iec-i --suffix=B)${RESET}"
-        
+
         ;;
         
     *)
