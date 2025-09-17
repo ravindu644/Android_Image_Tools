@@ -287,7 +287,7 @@ show_copy_progress() {
     done
     
     # Clear line and show completion
-    echo -e "\r\033[K${GREEN}[✓] Files copied to work directory${RESET}\n"
+    echo -e "\r\033[K${GREEN}[✓] Files copied to work directory${RESET}"
 }
 
 remove_repack_info() {
@@ -439,17 +439,21 @@ case $FS_CHOICE in
         read -p "Enter your choice [1-2]: " REPACK_MODE
 
         ORIGINAL_IMAGE=$(grep "SOURCE_IMAGE" "${REPACK_INFO}/metadata.txt" | cut -d'=' -f2)
+        ORIGINAL_FS_TYPE=$(grep "FILESYSTEM_TYPE" "${REPACK_INFO}/metadata.txt" | cut -d'=' -f2)
 
         # --- STRICT MODE LOGIC ---
 
         if [ "$REPACK_MODE" == "1" ]; then
-            echo -e "\n${YELLOW}${BOLD}Strict mode selected. Verifying original image...${RESET}"
-            if [ ! -f "$ORIGINAL_IMAGE" ]; then
-                echo -e "\n${RED}${BOLD}Error: Strict mode requires the original image '$ORIGINAL_IMAGE' to be present.${RESET}"
+
+            echo -e "\n${YELLOW}${BOLD}Strict mode selected. Verifying source filesystem...${RESET}\n"
+
+            if [ "$ORIGINAL_FS_TYPE" != "ext4" ]; then
+                echo -e "\n${RED}${BOLD}Error: Strict mode is only available when the source image is also ext4.${RESET}"
+                echo -e "${RED}The source for this project was '${ORIGINAL_FS_TYPE}'. Please choose Flexible mode.${RESET}"
                 exit 1
             fi
             
-            echo -e "${GREEN}Original image found. Cloning filesystem structure...${RESET}"
+            echo -e "${GREEN}Original image is ext4. Cloning filesystem structure...${RESET}"
             cp "$ORIGINAL_IMAGE" "$OUTPUT_IMG"
             mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
             (cd "$MOUNT_POINT" && find . -mindepth 1 ! -name 'lost+found' -delete)
@@ -457,11 +461,12 @@ case $FS_CHOICE in
         # --- FLEXIBLE MODE LOGIC ---
 
         else
-            echo -e "\n${YELLOW}${BOLD}Flexible mode selected. Analyzing source...${RESET}"
-            if [ -f "$ORIGINAL_IMAGE" ]; then
 
-                # --- Ideal Flexible Path: Original exists ---
-                echo -e "${BLUE}Original image found. Analyzing content size...${RESET}"
+            echo -e "\n${YELLOW}${BOLD}Flexible mode selected. Analyzing source...${RESET}\n"
+
+            if [ "$ORIGINAL_FS_TYPE" == "ext4" ]; then
+                # --- Ideal Flexible Path: Original exists and is ext4 ---
+                echo -e "${BLUE}Original image is ext4. Analyzing content size...${RESET}"
                 ORIGINAL_BLOCK_COUNT=$(get_fs_param "$ORIGINAL_IMAGE" "Block count")
                 ORIGINAL_CAPACITY=$((ORIGINAL_BLOCK_COUNT * 4096))
                 CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
@@ -473,6 +478,7 @@ case $FS_CHOICE in
                     (cd "$MOUNT_POINT" && find . -mindepth 1 ! -name 'lost+found' -delete)
 
                 else
+
                     echo -e "${YELLOW}Content is larger. Creating new image with original attributes as blueprint...${RESET}"
                     # Read all parameters for the new, larger image
                     UUID=$(get_fs_param "$ORIGINAL_IMAGE" "Filesystem UUID")
@@ -492,24 +498,25 @@ case $FS_CHOICE in
                 fi
 
             else
-                # --- Fallback Flexible Path: Original is missing ---
-                echo -e "\n${YELLOW}Warning: Original image not found. Creating a generic filesystem with estimated size.${RESET}\n"
+
+                # --- Fallback Flexible Path: Source is not ext4 (e.g., EROFS) ---
+
+                echo -e "${BLUE}Source is not ext4. Creating a new generic ext4 image...${RESET}"
                 CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
                 SIZE_WITH_OVERHEAD=$(echo "($CURRENT_CONTENT_SIZE * 1.25) + (32 * 1024 * 1024)" | bc)
                 BLOCK_COUNT=$(echo "($SIZE_WITH_OVERHEAD + 4095) / 4096" | bc)
                 
-                echo -e "${BLUE}Content size: $(numfmt --to=iec-i --suffix=B $CURRENT_CONTENT_SIZE)${RESET}"
                 echo -e "${BLUE}Calculated Block count: $BLOCK_COUNT${RESET}"
-
                 dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$BLOCK_COUNT" status=none
                 mkfs.ext4 -q "$OUTPUT_IMG"
                 mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
 
             fi
-            
+
         fi
 
         # --- Common part for all EXT4 paths: Refill and Finalize ---
+        
         echo -e "\n${BLUE}Copying files to image...${RESET}"
         (cd "$EXTRACT_DIR" && tar --selinux -cf - .) | (cd "$MOUNT_POINT" && tar --selinux -xf -) &
         show_copy_progress "$EXTRACT_DIR" "$MOUNT_POINT"
