@@ -252,9 +252,12 @@ else
     exit 1
 fi
 
-# Store timestamp and metadata location for repacking
+# Store timestamp, filesystem type and metadata location for repacking
 echo "UNPACK_TIME=$(date +%s)" > "${REPACK_INFO}/metadata.txt"
 echo "SOURCE_IMAGE=$IMAGE_FILE" >> "${REPACK_INFO}/metadata.txt"
+
+SOURCE_FS_TYPE=$(findmnt -n -o FSTYPE --target "$MOUNT_DIR")
+echo "FILESYSTEM_TYPE=$SOURCE_FS_TYPE" >> "${REPACK_INFO}/metadata.txt"
 
 # Verify extraction
 if [ $? -eq 0 ]; then
