@@ -1,6 +1,6 @@
 #!/bin/bash
 # EROFS Image Unpacker Script with File Attribute Preservation
-# Usage: ./unpack_erofs.sh <image_file>
+# Usage: ./unpack_erofs.sh <image_file> [output_directory] [--no-banner]
 
 set -e
 
@@ -21,7 +21,46 @@ print_banner() {
   echo -e "${RESET}"
 }
 
-print_banner
+# --- Start of Custom Tweaks ---
+# Argument parsing to handle calls from the wrapper script and enable a quiet mode.
+
+# Initialize variables
+IMAGE_FILE=""
+OUTPUT_DIR_OVERRIDE=""
+# This flag controls all interactive elements (banner, progress bars)
+INTERACTIVE_MODE=true
+
+# Manual parsing loop
+while (( "$#" )); do
+  case "$1" in
+    --no-banner)
+      INTERACTIVE_MODE=false
+      shift
+      ;;
+    -*) # Catch any unexpected flags
+      echo -e "${RED}Error: Unknown option $1${RESET}" >&2
+      echo -e "${YELLOW}Usage: $0 <image_file> [output_directory] [--no-banner]${RESET}"
+      exit 1
+      ;;
+    *) # Handle positional arguments
+      if [ -z "$IMAGE_FILE" ]; then
+        IMAGE_FILE="$1"
+      elif [ -z "$OUTPUT_DIR_OVERRIDE" ]; then
+        OUTPUT_DIR_OVERRIDE="$1"
+      else
+        echo -e "${RED}Error: Too many arguments. Unexpected: $1${RESET}" >&2
+        echo -e "${YELLOW}Usage: $0 <image_file> [output_directory] [--no-banner]${RESET}"
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [ "$INTERACTIVE_MODE" = true ]; then
+    print_banner
+fi
+# --- End of Custom Tweaks ---
 
 # Check if script is run as root
 if [ "$EUID" -ne 0 ]; then
@@ -29,17 +68,23 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# Check if image file is provided
-if [ $# -ne 1 ]; then
-  echo -e "${YELLOW}Usage: $0 <image_file>${RESET}"
+# Check if an image file was provided in the arguments
+if [ -z "$IMAGE_FILE" ]; then
+  echo -e "${YELLOW}Usage: $0 <image_file> [output_directory]${RESET}"
   echo -e "Example: $0 vendor.img"
   exit 1
 fi
 
-IMAGE_FILE="$1"
 PARTITION_NAME=$(basename "$IMAGE_FILE" .img)
+# --- Start of Custom Tweaks ---
+# Use the override if provided, otherwise use the default
+if [ -n "$OUTPUT_DIR_OVERRIDE" ]; then
+  EXTRACT_DIR="$OUTPUT_DIR_OVERRIDE"
+else
+  EXTRACT_DIR="extracted_${PARTITION_NAME}"
+fi
+# --- End of Custom Tweaks ---
 MOUNT_DIR="/tmp/${PARTITION_NAME}_mount"
-EXTRACT_DIR="extracted_${PARTITION_NAME}"
 REPACK_INFO="${EXTRACT_DIR}/.repack_info"
 RAW_IMAGE=""
 FS_CONFIG_FILE="${REPACK_INFO}/fs-config.txt"
@@ -70,8 +115,11 @@ show_progress() {
         sleep 0.1
     done
     
-    # Clear line and show completion
-    echo -e "\r\033[K${GREEN}[✓] Copy completed${RESET}\n"
+    # --- Start of Custom Tweaks ---
+    # REFINED: Clear the line on completion but DO NOT print a success message here.
+    # The final verification block is the single source of truth for success.
+    echo -e "\r\033[K"
+    # --- End of Custom Tweaks ---
 }
 
 # Function to clean up mount point and temporary files
@@ -274,23 +322,28 @@ echo -e "${BLUE}└─ Target: ${EXTRACT_DIR}${RESET}\n"
 # Calculate total size for progress
 total_size=$(du -sb "$MOUNT_DIR" | cut -f1)
 
-# Use tar with selinux flag for proper context preservation
-if command -v pv >/dev/null 2>&1; then
+# --- Start of Custom Tweaks ---
+# REFINED: Logic to select copy method based on INTERACTIVE_MODE.
+if [ "$INTERACTIVE_MODE" = true ] && command -v pv >/dev/null 2>&1; then
+    # Interactive mode with pv: Show progress bar.
     (cd "$MOUNT_DIR" && tar --selinux -cf - .) | \
     pv -s "$total_size" -N "Copying" | \
     (cd "$EXTRACT_DIR" && tar --selinux -xf -)
-    echo -e "\n${GREEN}[✓] Files copied successfully with SELinux contexts${RESET}"
-else
-    # Use custom progress display
+elif [ "$INTERACTIVE_MODE" = true ]; then
+    # Interactive mode without pv: Use custom spinner.
     (cd "$MOUNT_DIR" && tar --selinux -cf - .) | \
     (cd "$EXTRACT_DIR" && tar --selinux -xf -) & 
     show_progress $! "$EXTRACT_DIR" "$total_size"
     wait $!
-    # No need for another success message as show_progress already prints one
+else
+    # Non-interactive (quiet) mode: No progress indicators.
+    (cd "$MOUNT_DIR" && tar --selinux -cf - .) | (cd "$EXTRACT_DIR" && tar --selinux -xf -)
 fi
+# --- End of Custom Tweaks ---
 
 # Verify copy succeeded
 if [ $? -eq 0 ]; then
+    # REFINED: This is now the SINGLE source of the success message, preventing duplication.
     echo -e "${GREEN}[✓] Files copied successfully with SELinux contexts${RESET}"
 else
     echo -e "\n${RED}[!] Error occurred during copy${RESET}"

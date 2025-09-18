@@ -1,6 +1,42 @@
 #!/bin/bash
 # EROFS Image Repacker Script with Enhanced Attribute Restoration
-# Usage: ./repack_erofs.sh <extracted_folder_path>
+
+# --- Argument Parsing & Variable Setup ---
+EXTRACT_DIR=""
+OUTPUT_IMG=""
+
+# Default values for non-interactive mode
+FS_CHOICE=""
+EXT4_MODE=""
+EROFS_COMP=""
+EROFS_LEVEL=""
+NO_BANNER=false
+
+# Parse positional arguments first
+if [ $# -ge 1 ]; then
+    EXTRACT_DIR="$1"
+fi
+if [ $# -ge 2 ] && [[ "$2" != --* ]]; then
+    OUTPUT_IMG="$2"
+    shift 2
+else
+    shift 1
+fi
+
+# Non-interactive argument parsing
+# This block runs after positional args. If flags are passed, it populates the variables.
+# If no flags are passed, the script will fall back to interactive prompts.
+while [[ $# -gt 0 ]]; do
+    key="$1"
+    case $key in
+        --fs) FS_CHOICE="$2"; shift; shift ;;
+        --ext4-mode) EXT4_MODE="$2"; shift; shift ;;
+        --erofs-compression) EROFS_COMP="$2"; shift; shift ;;
+        --erofs-level) EROFS_LEVEL="$2"; shift; shift ;;
+        --no-banner) NO_BANNER=true; shift ;;
+        *) shift ;;
+    esac
+done
 
 set -e
 
@@ -14,11 +50,13 @@ RESET="\033[0m"
 
 # Banner function
 print_banner() {
-  echo -e "${BOLD}${GREEN}"
-  echo "┌───────────────────────────────────────────┐"
-  echo "│         Repack EROFS - by @ravindu644     │"
-  echo "└───────────────────────────────────────────┘"
-  echo -e "${RESET}"
+  if [ "$NO_BANNER" = false ]; then
+    echo -e "${BOLD}${GREEN}"
+    echo "┌───────────────────────────────────────────┐"
+    echo "│         Repack EROFS - by @ravindu644     │"
+    echo "└───────────────────────────────────────────┘"
+    echo -e "${RESET}"
+  fi
 }
 
 print_banner
@@ -38,25 +76,33 @@ if ! command -v mkfs.erofs &> /dev/null; then
 fi
 
 # Check if extracted folder is provided
-if [ $# -ne 1 ]; then
-  echo -e "${YELLOW}Usage: $0 <extracted_folder_path>${RESET}"
-  echo -e "Example: $0 extracted_vendor"
+if [ -z "$EXTRACT_DIR" ]; then
+  script_name=$(basename "$0")
+  echo -e "${YELLOW}Usage: $script_name <extracted_folder_path> [output_image.img] [options]${RESET}"
+  echo -e "Example: $script_name extracted_vendor"
   exit 1
 fi
 
-EXTRACT_DIR="$1"
+# Determine output image name if not provided
+if [ -z "$OUTPUT_IMG" ]; then
+    PARTITION_NAME=$(basename "$EXTRACT_DIR" | sed 's/^extracted_//')
+    OUTPUT_IMG="${PARTITION_NAME}_repacked.img"
+fi
+
 REPACK_INFO="${EXTRACT_DIR}/.repack_info"
 PARTITION_NAME=$(basename "$EXTRACT_DIR" | sed 's/^extracted_//')
-OUTPUT_IMG="${PARTITION_NAME}_repacked.img"
 FS_CONFIG_FILE="${REPACK_INFO}/fs-config.txt"
 FILE_CONTEXTS_FILE="${REPACK_INFO}/file_contexts.txt"
 
 # Add temp directory definition and cleanup function
 TEMP_ROOT="/tmp/repack-erofs"
 WORK_DIR="${TEMP_ROOT}/${PARTITION_NAME}_work"
+MOUNT_POINT=""
 
 cleanup() {
-    echo -e "\n${YELLOW}Cleaning up temporary files...${RESET}"
+    if [ "$NO_BANNER" = false ]; then
+        echo -e "\n${YELLOW}Cleaning up temporary files...${RESET}"
+    fi
 
     # First unmount any mounted filesystems
     if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
@@ -67,7 +113,9 @@ cleanup() {
     # Then remove temporary files    
     [ -d "$TEMP_ROOT" ] && rm -rf "$TEMP_ROOT"
     [ -f "$OUTPUT_IMG.tmp" ] && rm -f "$OUTPUT_IMG.tmp"
-    echo -e "${GREEN}Cleanup completed.${RESET}"
+    if [ "$NO_BANNER" = false ]; then
+        echo -e "${GREEN}Cleanup completed.${RESET}"
+    fi
 }
 
 # Register cleanup for interrupts and errors. The trap will handle the exit.
@@ -347,36 +395,58 @@ get_fs_param() {
 }
 
 # Start repacking process with better visuals
-echo -e "\n${BLUE}${BOLD}Starting repacking process...${RESET}"
-echo -e "${BLUE}┌─ Source directory: ${BOLD}$EXTRACT_DIR${RESET}"
-echo -e "${BLUE}└─ Target image: ${BOLD}$OUTPUT_IMG${RESET}\n"
+if [ "$NO_BANNER" = false ]; then
+    echo -e "\n${BLUE}${BOLD}Starting repacking process...${RESET}"
+    echo -e "${BLUE}┌─ Source directory: ${BOLD}$EXTRACT_DIR${RESET}"
+    echo -e "${BLUE}└─ Target image: ${BOLD}$OUTPUT_IMG${RESET}\n"
+fi
 
 # Add filesystem selection before any operations
-echo -e "\n${BLUE}${BOLD}Select filesystem type:${RESET}"
-echo -e "1. EROFS"
-echo -e "2. EXT4"
-read -p "Enter your choice [1-2]: " FS_CHOICE
+if [ -z "$FS_CHOICE" ]; then
+    echo -e "\n${BLUE}${BOLD}Select filesystem type:${RESET}"
+    echo -e "1. EROFS"
+    echo -e "2. EXT4"
+    read -p "Enter your choice [1-2]: " choice
+    case $choice in
+        1) FS_CHOICE="erofs" ;;
+        2) FS_CHOICE="ext4" ;;
+        *) FS_CHOICE="erofs" ;;
+    esac
+fi
 
 case $FS_CHOICE in
-    1)
+    erofs)
         # EROFS flow - prepare working directory first
         prepare_working_directory
         
-        echo -e "\n${BLUE}${BOLD}Select compression method:${RESET}"
-        echo -e "1. none (default)"
-        echo -e "2. lz4"
-        echo -e "3. lz4hc (level 0-12, default 9)"
-        echo -e "4. deflate (level 0-9, default 1)"
-        read -p "Enter your choice [1-4]: " COMP_CHOICE
+        if [ -z "$EROFS_COMP" ]; then
+            echo -e "\n${BLUE}${BOLD}Select compression method:${RESET}"
+            echo -e "1. none (default)"
+            echo -e "2. lz4"
+            echo -e "3. lz4hc (level 0-12, default 9)"
+            echo -e "4. deflate (level 0-9, default 1)"
+            read -p "Enter your choice [1-4]: " comp_choice
+            
+            case $comp_choice in
+              2) EROFS_COMP="lz4" ;;
+              3) EROFS_COMP="lz4hc" ;;
+              4) EROFS_COMP="deflate" ;;
+              *) EROFS_COMP="none" ;;
+            esac
+        fi
 
-        case $COMP_CHOICE in
-          2)
+        case $EROFS_COMP in
+          lz4)
             COMPRESSION="-zlz4"
             ;;
-          3)
-            echo -e "\n${BLUE}${BOLD}Select LZ4HC compression level (0-12):${RESET}"
-            echo -e "Default: 9 (higher = better compression but slower)"
-            read -p "Enter compression level: " COMP_LEVEL
+          lz4hc)
+            if [ -z "$EROFS_LEVEL" ]; then
+                echo -e "\n${BLUE}${BOLD}Select LZ4HC compression level (0-12):${RESET}"
+                echo -e "Default: 9 (higher = better compression but slower)"
+                read -p "Enter compression level: " COMP_LEVEL
+            else
+                COMP_LEVEL="$EROFS_LEVEL"
+            fi
             
             if [[ "$COMP_LEVEL" =~ ^([0-9]|1[0-2])$ ]]; then
               COMPRESSION="-zlz4hc,level=$COMP_LEVEL"
@@ -385,10 +455,14 @@ case $FS_CHOICE in
               COMPRESSION="-zlz4hc"
             fi
             ;;
-          4)
-            echo -e "\n${BLUE}${BOLD}Select DEFLATE compression level (0-9):${RESET}"
-            echo -e "Default: 1 (higher = better compression but slower)"
-            read -p "Enter compression level: " COMP_LEVEL
+          deflate)
+            if [ -z "$EROFS_LEVEL" ]; then
+                echo -e "\n${BLUE}${BOLD}Select DEFLATE compression level (0-9):${RESET}"
+                echo -e "Default: 1 (higher = better compression but slower)"
+                read -p "Enter compression level: " COMP_LEVEL
+            else
+                COMP_LEVEL="$EROFS_LEVEL"
+            fi
             
             if [[ "$COMP_LEVEL" =~ ^[0-9]$ ]]; then
               COMPRESSION="-zdeflate,level=$COMP_LEVEL"
@@ -425,15 +499,22 @@ case $FS_CHOICE in
         fi
         ;;
 
-    2)
+    ext4)
         # EXT4 flow
         MOUNT_POINT="${TEMP_ROOT}/ext4_mount"
         mkdir -p "$MOUNT_POINT"
 
-        echo -e "\n${BLUE}${BOLD}Select EXT4 Repack Mode:${RESET}"
-        echo -e "1. Strict (clone original image structure exactly - for repair)"
-        echo -e "2. Flexible (auto-resize if content is larger - for customization)"
-        read -p "Enter your choice [1-2]: " REPACK_MODE
+        if [ -z "$EXT4_MODE" ]; then
+            echo -e "\n${BLUE}${BOLD}Select EXT4 Repack Mode:${RESET}"
+            echo -e "1. Strict (clone original image structure exactly - for repair)"
+            echo -e "2. Flexible (auto-resize if content is larger - for customization)"
+            read -p "Enter your choice [1-2]: " mode_choice
+            case $mode_choice in
+                1) EXT4_MODE="strict" ;;
+                2) EXT4_MODE="flexible" ;;
+                *) EXT4_MODE="flexible" ;;
+            esac
+        fi
 
         ORIGINAL_IMAGE=$(grep "SOURCE_IMAGE" "${REPACK_INFO}/metadata.txt" | awk -F'=' '{print $2}')
         ORIGINAL_FS_TYPE=$(grep "FILESYSTEM_TYPE" "${REPACK_INFO}/metadata.txt" | awk -F'=' '{print $2}')
@@ -451,7 +532,7 @@ case $FS_CHOICE in
             CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
         fi
 
-        if [ "$REPACK_MODE" == "1" ]; then
+        if [ "$EXT4_MODE" == "strict" ]; then
             echo -e "\n${YELLOW}${BOLD}Strict mode selected. Verifying source filesystem and content...${RESET}\n"
 
             if [ "$ORIGINAL_FS_TYPE" != "ext4" ]; then
@@ -567,4 +648,6 @@ fi
 trap - INT TERM EXIT
 cleanup
 
-echo -e "\n${GREEN}${BOLD}Done!${RESET}"
+if [ "$NO_BANNER" = false ]; then
+    echo -e "\n${GREEN}${BOLD}Done!${RESET}"
+fi
