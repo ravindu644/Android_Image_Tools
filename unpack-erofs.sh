@@ -69,11 +69,11 @@ handle_journal_recovery() {
 handle_shared_blocks() {
     local image_file="$1"
     if tune2fs -l "$image_file" 2>/dev/null | grep -q "shared_blocks"; then
-        echo -e "\n${YELLOW}Warning: Incompatible 'shared_blocks' feature detected.${RESET}"
+        echo -e "\n${YELLOW}${BOLD}Warning: Incompatible 'shared_blocks' feature detected.${RESET}\n"
         if e2fsck -E unshare_blocks -fy "$image_file" >/dev/null 2>&1; then
             e2fsck -fy "$image_file" >/dev/null 2>&1
-            echo -e "${GREEN}[✓] 'shared_blocks' feature disabled successfully.${RESET}"
-        else echo -e "${RED}Error: Failed to unshare blocks.${RESET}"; exit 1; fi
+            echo -e "${GREEN}${BOLD}[✓] 'shared_blocks' feature disabled successfully.${RESET}\n"
+        else echo -e "${RED}${BOLD}Error: Failed to unshare blocks.${RESET}\n"; exit 1; fi
     fi
 }
 
@@ -146,11 +146,9 @@ echo "SOURCE_IMAGE=$(realpath "$IMAGE_FILE")" >> "${REPACK_INFO}/metadata.txt"
 SOURCE_FS_TYPE=$(findmnt -n -o FSTYPE --target "$MOUNT_DIR")
 echo "FILESYSTEM_TYPE=$SOURCE_FS_TYPE" >> "${REPACK_INFO}/metadata.txt"
 
-echo -e "\n${GREEN}Extraction completed successfully.${RESET}"
+echo -e "\n${GREEN}${BOLD}Extraction completed successfully.${RESET}\n"
 echo -e "${BOLD}Files extracted to: ${EXTRACT_DIR}${RESET}"
 echo -e "${BOLD}Repack info stored in: ${REPACK_INFO}${RESET}"
 
 if [ -n "$SUDO_USER" ]; then chown -R "$SUDO_USER:$SUDO_USER" "$EXTRACT_DIR"; fi
 if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then umount "$MOUNT_DIR"; echo -e "\n${GREEN}Image unmounted successfully.${RESET}"; fi
-
-echo
