@@ -1,570 +1,303 @@
 #!/bin/bash
 # EROFS Image Repacker Script with Enhanced Attribute Restoration
-# Usage: ./repack_erofs.sh <extracted_folder_path>
+
+# --- Argument Parsing ---
+# This script can be run standalone or called by a wrapper.
+# Standalone: ./repack-erofs.sh <extracted_folder_path>
+# Wrapper:    ./repack-erofs.sh <dir> <out.img> --fs <type> [options] --no-banner
+
+EXTRACT_DIR="$1"
+OUTPUT_IMG="$2" # Can be a flag or positional
+
+# Default values
+FS_CHOICE=""
+EXT4_MODE=""
+EROFS_COMP=""
+EROFS_LEVEL=""
+NO_BANNER=false
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    key="$1"
+    case $key in
+        --fs) FS_CHOICE="$2"; shift; shift ;;
+        --ext4-mode) EXT4_MODE="$2"; shift; shift ;;
+        --erofs-compression) EROFS_COMP="$2"; shift; shift ;;
+        --erofs-level) EROFS_LEVEL="$2"; shift; shift ;;
+        --no-banner) NO_BANNER=true; shift ;;
+        *) shift ;;
+    esac
+done
 
 set -e
 
-# Define color codes
-RED="\033[0;31m"
-GREEN="\033[0;32m"
-YELLOW="\033[0;33m"
-BLUE="\033[0;34m"
-BOLD="\033[1m"
-RESET="\033[0m"
+# --- Script Body ---
+RED="\033[0;31m"; GREEN="\033[0;32m"; YELLOW="\033[0;33m"; BLUE="\033[0;34m"; BOLD="\033[1m"; RESET="\033[0m"
 
-# Banner function
 print_banner() {
-  echo -e "${BOLD}${GREEN}"
-  echo "┌───────────────────────────────────────────┐"
-  echo "│         Repack EROFS - by @ravindu644     │"
-  echo "└───────────────────────────────────────────┘"
-  echo -e "${RESET}"
+  if [ "$NO_BANNER" = false ]; then
+    echo -e "${BOLD}${GREEN}"
+    echo "┌───────────────────────────────────────────┐"
+    echo "│         Repack EROFS - by @ravindu644     │"
+    echo "└──────────────────────────────────────────┘"
+    echo -e "${RESET}"
+  fi
 }
 
 print_banner
 
-# Check if script is run as root
-if [ "$EUID" -ne 0 ]; then
-  echo -e "${RED}This script requires root privileges. Please run with sudo.${RESET}"
-  exit 1
+if [ "$EUID" -ne 0 ]; then echo -e "${RED}This script requires root privileges. Please run with sudo.${RESET}"; exit 1; fi
+if ! command -v mkfs.erofs &> /dev/null; then echo -e "${RED}mkfs.erofs not found. Please install erofs-utils.${RESET}"; exit 1; fi
+
+if [ -z "$EXTRACT_DIR" ]; then
+    echo -e "${YELLOW}Usage: $0 <extracted_folder_path> [output_image.img] [options]${RESET}"; exit 1
 fi
 
-# Check if mkfs.erofs is installed
-if ! command -v mkfs.erofs &> /dev/null; then
-  echo -e "${RED}mkfs.erofs command not found. Please install erofs-utils package.${RESET}"
-  echo -e "For Ubuntu/Debian: sudo apt install erofs-utils"
-  echo -e "For other distributions, check your package manager.${RESET}"
-  exit 1
+# If output image is a flag, it will be caught by the parser. If it's positional, it's $2.
+# We reset it here if it's not a valid path.
+if [[ "$OUTPUT_IMG" == --* || -z "$OUTPUT_IMG" ]]; then
+    OUTPUT_IMG=""
 fi
 
-# Check if extracted folder is provided
-if [ $# -ne 1 ]; then
-  echo -e "${YELLOW}Usage: $0 <extracted_folder_path>${RESET}"
-  echo -e "Example: $0 extracted_vendor"
-  exit 1
-fi
-
-EXTRACT_DIR="$1"
 REPACK_INFO="${EXTRACT_DIR}/.repack_info"
 PARTITION_NAME=$(basename "$EXTRACT_DIR" | sed 's/^extracted_//')
-OUTPUT_IMG="${PARTITION_NAME}_repacked.img"
+[ -z "$OUTPUT_IMG" ] && OUTPUT_IMG="${PARTITION_NAME}_repacked.img"
 FS_CONFIG_FILE="${REPACK_INFO}/fs-config.txt"
 FILE_CONTEXTS_FILE="${REPACK_INFO}/file_contexts.txt"
 
-# Add temp directory definition and cleanup function
-TEMP_ROOT="/tmp/repack-erofs"
+TEMP_ROOT="/tmp/repack-$(basename "$EXTRACT_DIR")"
 WORK_DIR="${TEMP_ROOT}/${PARTITION_NAME}_work"
+MOUNT_POINT="" # To be defined later
 
 cleanup() {
-    echo -e "\n${YELLOW}Cleaning up temporary files...${RESET}"
-
-    # First unmount any mounted filesystems
+    if [ "$NO_BANNER" = false ]; then echo -e "\n${YELLOW}Cleaning up temporary files...${RESET}"; fi
     if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
         sync
         umount "$MOUNT_POINT" 2>/dev/null || umount -l "$MOUNT_POINT" 2>/dev/null
     fi
-    
-    # Then remove temporary files    
     [ -d "$TEMP_ROOT" ] && rm -rf "$TEMP_ROOT"
-    [ -f "$OUTPUT_IMG.tmp" ] && rm -f "$OUTPUT_IMG.tmp"
-    echo -e "${GREEN}Cleanup completed.${RESET}"
+    [ -f "${OUTPUT_IMG}.tmp" ] && rm -f "${OUTPUT_IMG}.tmp"
+    if [ "$NO_BANNER" = false ]; then echo -e "${GREEN}Cleanup completed.${RESET}"; fi
 }
 
-# Register cleanup for interrupts and errors. The trap will handle the exit.
 trap 'cleanup; exit 1' INT TERM EXIT
 
-# Check if repack info exists
-if [ ! -d "$REPACK_INFO" ]; then
-  echo -e "${RED}Error: Repack info directory not found at ${REPACK_INFO}${RESET}"
-  echo -e "${RED}This directory does not appear to be created by the unpack script.${RESET}"
-  exit 1
-fi
-
-# Remove trailing slash if present
+if [ ! -d "$REPACK_INFO" ]; then echo -e "${RED}Error: Repack info not found at ${REPACK_INFO}${RESET}"; exit 1; fi
 EXTRACT_DIR=${EXTRACT_DIR%/}
-
-# Check if extracted directory exists
-if [ ! -d "$EXTRACT_DIR" ]; then
-  echo -e "${RED}Error: Directory '$EXTRACT_DIR' not found.${RESET}"
-  exit 1
-fi
+if [ ! -d "$EXTRACT_DIR" ]; then echo -e "${RED}Error: Directory '$EXTRACT_DIR' not found.${RESET}"; exit 1; fi
 
 find_matching_pattern() {
-    local path="$1"
-    local config_file="$2"
-    local pattern=""
-
-    # If the path is the root itself, handle it directly
-    if [ "$path" = "/" ]; then
-        echo "$(grep -E '^/ ' "$config_file" | head -n1)"
-        return
-    fi
-    
-    local parent_dir
-    parent_dir=$(dirname "$path")
-
-    # Loop upwards from the immediate parent until we find an ancestor in the metadata
+    local path="$1"; local config_file="$2"; local pattern=""
+    if [ "$path" = "/" ]; then echo "$(grep -E '^/ ' "$config_file" | head -n1)"; return; fi
+    local parent_dir=$(dirname "$path")
     while true; do
-        # Check if this parent exists in the config file.
         pattern=$(grep -E "^${parent_dir} " "$config_file" | head -n1)
-        if [ -n "$pattern" ]; then
-            echo "$pattern"
-            return
-        fi
-
-        # If we have reached the root directory and haven't found a match, break the loop
-        if [ "$parent_dir" = "/" ]; then
-            break
-        fi
-
-        # Go up one level
+        if [ -n "$pattern" ]; then echo "$pattern"; return; fi
+        if [ "$parent_dir" = "/" ]; then break; fi
         parent_dir=$(dirname "$parent_dir")
     done
-    
-    # As a final fallback, use the root's entry if no other ancestor was found
     echo "$(grep -E '^/ ' "$config_file" | head -n1)"
 }
 
 restore_attributes() {
     echo -e "\n${BLUE}Initializing permission restoration...${RESET}"
     echo -e "${BLUE}┌─ Analyzing filesystem structure...${RESET}"
-    
-    # Process symlinks first
     if [ -f "${REPACK_INFO}/symlink_info.txt" ]; then
         while IFS=' ' read -r path target uid gid mode context || [ -n "$path" ]; do
-            [ -z "$path" ] && continue
-            [[ "$path" =~ ^#.*$ ]] && continue
-            
-            full_path="$1$path"
-            [ ! -L "$full_path" ] && ln -sf "$target" "$full_path"
+            [[ "$path" =~ ^#.*$ || -z "$path" ]] && continue
+            full_path="$1$path"; [ ! -L "$full_path" ] && ln -sf "$target" "$full_path"
             chown -h "$uid:$gid" "$full_path" 2>/dev/null || true
             [ -n "$context" ] && chcon -h "$context" "$full_path" 2>/dev/null || true
         done < "${REPACK_INFO}/symlink_info.txt"
     fi
-    
-    DIR_COUNT=$(find "$1" -type d | wc -l)
-    FILE_COUNT=$(find "$1" -type f | wc -l)
+    DIR_COUNT=$(find "$1" -type d | wc -l); FILE_COUNT=$(find "$1" -type f | wc -l)
     echo -e "${BLUE}├─ Found ${BOLD}$DIR_COUNT${RESET}${BLUE} directories${RESET}"
     echo -e "${BLUE}└─ Found ${BOLD}$FILE_COUNT${RESET}${BLUE} files${RESET}\n"
-
-    # Process directories
     echo -e "${BLUE}Processing directory structure...${RESET}"
-    processed=0
-    spin=0
-    spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
-
+    processed=0; spin=0; spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
     find "$1" -type d | while read -r item; do
-        processed=$((processed + 1))
-        percentage=$((processed * 100 / DIR_COUNT))
-        rel_path=${item#$1}
-        [ -z "$rel_path" ] && rel_path="/"
-        
-        # Use awk for robust parsing
+        processed=$((processed + 1)); percentage=$((processed * 100 / DIR_COUNT)); rel_path=${item#$1}; [ -z "$rel_path" ] && rel_path="/"
         stored_attrs=$(grep -E "^${rel_path} " "$FS_CONFIG_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
         stored_context=$(grep -E "^${rel_path} " "$FILE_CONTEXTS_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
-
         if [ -z "$stored_attrs" ]; then
-            # New directory: find attributes from the closest known ancestor
-            pattern=$(find_matching_pattern "$rel_path" "$FS_CONFIG_FILE")
-            uid=$(echo "$pattern" | awk '{print $2}')
-            gid=$(echo "$pattern" | awk '{print $3}')
-            mode=$(echo "$pattern" | awk '{print $4}')
-            
-            chown "${uid:-0}:${gid:-0}" "$item" 2>/dev/null || true
-            chmod "${mode:-755}" "$item" 2>/dev/null || true
-            
-            context_pattern=$(find_matching_pattern "$rel_path" "$FILE_CONTEXTS_FILE")
-            context=$(echo "$context_pattern" | awk '{$1=""; print $0}' | sed 's/^ //')
+            pattern=$(find_matching_pattern "$rel_path" "$FS_CONFIG_FILE"); uid=$(echo "$pattern" | awk '{print $2}'); gid=$(echo "$pattern" | awk '{print $3}'); mode=$(echo "$pattern" | awk '{print $4}')
+            chown "${uid:-0}:${gid:-0}" "$item" 2>/dev/null || true; chmod "${mode:-755}" "$item" 2>/dev/null || true
+            context_pattern=$(find_matching_pattern "$rel_path" "$FILE_CONTEXTS_FILE"); context=$(echo "$context_pattern" | awk '{$1=""; print $0}' | sed 's/^ //')
             [ -n "$context" ] && chcon "$context" "$item" 2>/dev/null || true
         else
-            # Existing directory: restore original attributes
-            uid=$(echo "$stored_attrs" | awk '{print $1}')
-            gid=$(echo "$stored_attrs" | awk '{print $2}')
-            mode=$(echo "$stored_attrs" | awk '{print $3}')
-            
-            chown "$uid:$gid" "$item" 2>/dev/null || true
-            chmod "$mode" "$item" 2>/dev/null || true
+            uid=$(echo "$stored_attrs" | awk '{print $1}'); gid=$(echo "$stored_attrs" | awk '{print $2}'); mode=$(echo "$stored_attrs" | awk '{print $3}')
+            chown "$uid:$gid" "$item" 2>/dev/null || true; chmod "$mode" "$item" 2>/dev/null || true
             [ -n "$stored_context" ] && chcon "$stored_context" "$item" 2>/dev/null || true
         fi
-        
         echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Mapping contexts: ${percentage}% (${processed}/${DIR_COUNT})${RESET}"
     done
     echo -e "\r\033[K${GREEN}[✓] Directory attributes mapped${RESET}\n"
-
-    # Process files
-    echo -e "${BLUE}Processing file permissions...${RESET}"
-    processed=0
-    spin=0
-
+    echo -e "${BLUE}Processing file permissions...${RESET}"; processed=0; spin=0
     find "$1" -type f | while read -r item; do
-        processed=$((processed + 1))
-        percentage=$((processed * 100 / FILE_COUNT))
-        rel_path=${item#$1}
-        
+        processed=$((processed + 1)); percentage=$((processed * 100 / FILE_COUNT)); rel_path=${item#$1}
         stored_attrs=$(grep -E "^${rel_path} " "$FS_CONFIG_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
         stored_context=$(grep -E "^${rel_path} " "$FILE_CONTEXTS_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
-
         if [ -z "$stored_attrs" ]; then
-            # New file: find ownership/context from the closest known ancestor
-            pattern=$(find_matching_pattern "$rel_path" "$FS_CONFIG_FILE")
-            uid=$(echo "$pattern" | awk '{print $2}')
-            gid=$(echo "$pattern" | awk '{print $3}')
-
-            chown "${uid:-0}:${gid:-0}" "$item" 2>/dev/null || true
-            chmod 644 "$item" 2>/dev/null || true
-            
-            context_pattern=$(find_matching_pattern "$rel_path" "$FILE_CONTEXTS_FILE")
-            context=$(echo "$context_pattern" | awk '{$1=""; print $0}' | sed 's/^ //')
+            pattern=$(find_matching_pattern "$rel_path" "$FS_CONFIG_FILE"); uid=$(echo "$pattern" | awk '{print $2}'); gid=$(echo "$pattern" | awk '{print $3}')
+            chown "${uid:-0}:${gid:-0}" "$item" 2>/dev/null || true; chmod 644 "$item" 2>/dev/null || true
+            context_pattern=$(find_matching_pattern "$rel_path" "$FILE_CONTEXTS_FILE"); context=$(echo "$context_pattern" | awk '{$1=""; print $0}' | sed 's/^ //')
             [ -n "$context" ] && chcon "$context" "$item" 2>/dev/null || true
         else
-            # Existing file: restore original attributes
-            uid=$(echo "$stored_attrs" | awk '{print $1}')
-            gid=$(echo "$stored_attrs" | awk '{print $2}')
-            mode=$(echo "$stored_attrs" | awk '{print $3}')
-            
-            chown "$uid:$gid" "$item" 2>/dev/null || true
-            chmod "$mode" "$item" 2>/dev/null || true
+            uid=$(echo "$stored_attrs" | awk '{print $1}'); gid=$(echo "$stored_attrs" | awk '{print $2}'); mode=$(echo "$stored_attrs" | awk '{print $3}')
+            chown "$uid:$gid" "$item" 2>/dev/null || true; chmod "$mode" "$item" 2>/dev/null || true
             [ -n "$stored_context" ] && chcon "$stored_context" "$item" 2>/dev/null || true
         fi
-
         echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Restoring contexts: ${percentage}% (${processed}/${FILE_COUNT})${RESET}"
     done
     echo -e "\r\033[K${GREEN}[✓] File attributes restored${RESET}\n"
 }
 
 verify_modifications() {
-    local src="$1"
-    echo -e "\n${BLUE}Verifying modified files...${RESET}"
-    
-    # Generate current checksums excluding .repack_info
-    local curr_sums="/tmp/current_checksums.txt"
+    local src="$1"; echo -e "\n${BLUE}Verifying modified files...${RESET}"
+    local curr_sums="/tmp/current_checksums_$(basename "$src").txt"
     (cd "$src" && find . -type f -not -path "./.repack_info/*" -exec sha256sum {} \;) > "$curr_sums"
-    
     echo -e "${BLUE}Analyzing changes...${RESET}"
-    local modified_files=0
-    local total_files=0
-    local spin=0
-    local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
-    
+    local modified_files=0; local total_files=0; local spin=0; local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
     while IFS= read -r line; do
-        total_files=$((total_files + 1))
-        checksum=$(echo "$line" | cut -d' ' -f1)
-        file=$(echo "$line" | cut -d' ' -f3-)
-        
-        # Show spinner while processing
+        total_files=$((total_files + 1)); checksum=$(echo "$line" | cut -d' ' -f1); file=$(echo "$line" | cut -d' ' -f3-)
         echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Analyzing files...${RESET}"
-        
         if ! grep -q "$checksum.*$file" "${REPACK_INFO}/original_checksums.txt" 2>/dev/null; then
-            modified_files=$((modified_files + 1))
-            echo -e "\r\033[K${YELLOW}Modified: $file${RESET}"
+            modified_files=$((modified_files + 1)); echo -e "\r\033[K${YELLOW}Modified: $file${RESET}"
         fi
     done < "$curr_sums"
-    
-    # Clear progress line and show summary
-    echo -e "\r\033[K${BLUE}Found ${YELLOW}$modified_files${BLUE} modified files out of $total_files total files${RESET}"
-    rm -f "$curr_sums"
+    echo -e "\r\033[K${BLUE}Found ${YELLOW}$modified_files${BLUE} modified files out of $total_files total files${RESET}"; rm -f "$curr_sums"
 }
 
 show_copy_progress() {
-    local src="$1"
-    local dst="$2"
-    local total_size=$(du -sb "$src" | cut -f1)
-    local spin=0
-    local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
-
-    while kill -0 $! 2>/dev/null; do
-        current_size=$(du -sb "$dst" | cut -f1)
-        percentage=$((current_size * 100 / total_size))
-        current_hr=$(numfmt --to=iec-i --suffix=B "$current_size")
-        total_hr=$(numfmt --to=iec-i --suffix=B "$total_size")
-        
-        # Clear entire line with \033[K before printing
-        echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Copying to work directory: ${percentage}% (${current_hr}/${total_hr})${RESET}"
-        sleep 0.1
+    local pid=$!
+    local src="$1"; local dst="$2"; local total_size;
+    total_size=$(du -sb --exclude=.repack_info "$src" | cut -f1)
+    local spin=0; spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
+    while kill -0 $pid 2>/dev/null; do
+        current_size=$(du -sb "$dst" | cut -f1); percentage=$((current_size * 100 / total_size))
+        current_hr=$(numfmt --to=iec-i --suffix=B "$current_size"); total_hr=$(numfmt --to=iec-i --suffix=B "$total_size")
+        echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Copying to temp dir: ${percentage}% (${current_hr}/${total_hr})${RESET}"; sleep 0.1
     done
-    
-    # Clear line and show completion
-    echo -e "\r\033[K${GREEN}[✓] Files copied to work directory${RESET}"
+    echo -e "\r\033[K${GREEN}[✓] Files copied to temp dir${RESET}"
 }
 
-remove_repack_info() {
-    local target_dir="$1"
-    rm -rf "${target_dir}/.repack_info" 2>/dev/null
-    rm -rf "${target_dir}/fs-config.txt" 2>/dev/null
-}
+remove_repack_info() { rm -rf "${1}/.repack_info" 2>/dev/null; }
 
 prepare_working_directory() {
-    echo -e "\n${BLUE}Preparing working directory...${RESET}"
-    mkdir -p "$TEMP_ROOT"
-    [ -d "$WORK_DIR" ] && rm -rf "$WORK_DIR"
-    mkdir -p "$WORK_DIR"
-    
-    # Copy with SELinux contexts and progress
+    echo -e "\n${BLUE}Preparing working directory...${RESET}"; mkdir -p "$TEMP_ROOT"; [ -d "$WORK_DIR" ] && rm -rf "$WORK_DIR"; mkdir -p "$WORK_DIR"
     echo -e "${BLUE}Copying files to work directory...${RESET}"
-    (cd "$EXTRACT_DIR" && tar --selinux -cf - .) | (cd "$WORK_DIR" && tar --selinux -xf -) &
+    (cd "$EXTRACT_DIR" && tar --selinux --exclude=.repack_info -cf - .) | (cd "$WORK_DIR" && tar --selinux -xf -) &
     show_copy_progress "$EXTRACT_DIR" "$WORK_DIR"
     wait $!
-    
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}Error: Failed to copy files with attributes${RESET}"
-        cleanup ERROR
-    fi
-    
-    verify_modifications "$WORK_DIR"
-    restore_attributes "$WORK_DIR"
-    remove_repack_info "$WORK_DIR"
+    if [ $? -ne 0 ]; then echo -e "${RED}Error: Failed to copy files with attributes${RESET}"; cleanup; exit 1; fi
+    verify_modifications "$WORK_DIR"; restore_attributes "$WORK_DIR"; remove_repack_info "$WORK_DIR"
 }
 
-create_ext4_image_quiet() {
-    local blocks="$1"
-    local output="$2"
-    local mount_point="$3"
-
-    # Create raw image quietly
-    dd if=/dev/zero of="$output" bs=4096 count="$blocks" status=none
-
-    # Format ext4 quietly
-    mkfs.ext4 -q \
-        -O ext_attr,dir_index,filetype,extent,sparse_super,large_file,huge_file,uninit_bg,dir_nlink,extra_isize \
-        -O ^has_journal,^resize_inode,^64bit,^flex_bg,^metadata_csum "$output"
-
-    mkdir -p "$mount_point"
-    mount -o loop,rw "$output" "$mount_point" 2>/dev/null
-}
-
-# Function to get original filesystem parameters (robust and universal)
 get_fs_param() {
-    local image_file="$1"
-    local param="$2"
-    if [ ! -f "$image_file" ]; then
-        echo ""
-        return
-    fi
-    # This robustly extracts the value after the colon, trims whitespace,
-    # and takes the first "word", which is the actual numerical value or keyword.
-    # It correctly handles lines like "Reserved blocks uid: 0 (user root)".
+    local image_file="$1"; local param="$2"; [ ! -f "$image_file" ] && { echo ""; return; }
     tune2fs -l "$image_file" | grep -E "^${param}:" | awk -F':' '{print $2}' | awk '{print $1}'
 }
 
-# Start repacking process with better visuals
-echo -e "\n${BLUE}${BOLD}Starting repacking process...${RESET}"
-echo -e "${BLUE}┌─ Source directory: ${BOLD}$EXTRACT_DIR${RESET}"
-echo -e "${BLUE}└─ Target image: ${BOLD}$OUTPUT_IMG${RESET}\n"
+# --- Main Logic ---
+if [ "$NO_BANNER" = false ]; then
+  echo -e "\n${BLUE}${BOLD}Starting repacking process...${RESET}"
+  echo -e "${BLUE}┌─ Source directory: ${BOLD}$EXTRACT_DIR${RESET}"
+  echo -e "${BLUE}└─ Target image: ${BOLD}$OUTPUT_IMG${RESET}\n"
+fi
 
-# Add filesystem selection before any operations
-echo -e "\n${BLUE}${BOLD}Select filesystem type:${RESET}"
-echo -e "1. EROFS"
-echo -e "2. EXT4"
-read -p "Enter your choice [1-2]: " FS_CHOICE
+# Filesystem Selection
+if [ -z "$FS_CHOICE" ]; then
+    echo -e "\n${BLUE}${BOLD}Select filesystem type:${RESET}"
+    echo -e "1. EROFS"
+    echo -e "2. EXT4"
+    read -p "Enter your choice [1-2]: " choice
+    [ "$choice" == "1" ] && FS_CHOICE="erofs" || FS_CHOICE="ext4"
+fi
 
 case $FS_CHOICE in
-    1)
-        # EROFS flow - prepare working directory first
+    erofs)
         prepare_working_directory
-        
-        echo -e "\n${BLUE}${BOLD}Select compression method:${RESET}"
-        echo -e "1. none (default)"
-        echo -e "2. lz4"
-        echo -e "3. lz4hc (level 0-12, default 9)"
-        echo -e "4. deflate (level 0-9, default 1)"
-        read -p "Enter your choice [1-4]: " COMP_CHOICE
-
-        case $COMP_CHOICE in
-          2)
-            COMPRESSION="-zlz4"
-            ;;
-          3)
-            echo -e "\n${BLUE}${BOLD}Select LZ4HC compression level (0-12):${RESET}"
-            echo -e "Default: 9 (higher = better compression but slower)"
-            read -p "Enter compression level: " COMP_LEVEL
-            
-            if [[ "$COMP_LEVEL" =~ ^([0-9]|1[0-2])$ ]]; then
-              COMPRESSION="-zlz4hc,level=$COMP_LEVEL"
-            else
-              echo -e "${YELLOW}Invalid level. Using default level 9.${RESET}"
-              COMPRESSION="-zlz4hc"
-            fi
-            ;;
-          4)
-            echo -e "\n${BLUE}${BOLD}Select DEFLATE compression level (0-9):${RESET}"
-            echo -e "Default: 1 (higher = better compression but slower)"
-            read -p "Enter compression level: " COMP_LEVEL
-            
-            if [[ "$COMP_LEVEL" =~ ^[0-9]$ ]]; then
-              COMPRESSION="-zdeflate,level=$COMP_LEVEL"
-            else
-              echo -e "${YELLOW}Invalid level. Using default level 1.${RESET}"
-              COMPRESSION="-zdeflate"
-            fi
-            ;;
-          *)
-            COMPRESSION=""
-            echo -e "${BLUE}Using no compression.${RESET}"
-            ;;
-        esac
-        
-        # Create the EROFS image with simplest command
-        MKFS_CMD="mkfs.erofs"
-        if [ -n "$COMPRESSION" ]; then
-            MKFS_CMD="$MKFS_CMD $COMPRESSION"
+        if [ -z "$EROFS_COMP" ]; then
+            echo -e "\n${BLUE}${BOLD}Select compression method:${RESET}"
+            options=("none" "lz4" "lz4hc" "deflate"); read -p "Choice (1-4): " c; EROFS_COMP=${options[$((c-1))]}
         fi
-        MKFS_CMD="$MKFS_CMD $OUTPUT_IMG.tmp $WORK_DIR"
-
-        # Show the command
-        echo -e "\n${BLUE}Executing command:${RESET}"
-        echo -e "${BOLD}$MKFS_CMD${RESET}\n"
-
-        # Create the EROFS image
-        echo -e "${BLUE}Creating EROFS image... This may take some time.${RESET}\n"
-        eval $MKFS_CMD
-        
+        COMPRESSION_ARG=""
+        case $EROFS_COMP in
+            lz4) COMPRESSION_ARG="-zlz4" ;;
+            lz4hc)
+                [ -z "$EROFS_LEVEL" ] && read -p "LZ4HC level (0-12) [9]: " EROFS_LEVEL
+                COMPRESSION_ARG="-zlz4hc,level=${EROFS_LEVEL:-9}"
+                ;;
+            deflate)
+                [ -z "$EROFS_LEVEL" ] && read -p "Deflate level (0-9) [1]: " EROFS_LEVEL
+                COMPRESSION_ARG="-zdeflate,level=${EROFS_LEVEL:-1}"
+                ;;
+        esac
+        MKFS_CMD="mkfs.erofs $COMPRESSION_ARG ${OUTPUT_IMG}.tmp $WORK_DIR"
+        echo -e "\n${BLUE}Executing command:${RESET} ${BOLD}$MKFS_CMD${RESET}\n"
+        eval "$MKFS_CMD"
         if [ $? -eq 0 ]; then
-            mv "$OUTPUT_IMG.tmp" "$OUTPUT_IMG"
+            mv "${OUTPUT_IMG}.tmp" "$OUTPUT_IMG"
             echo -e "\n${GREEN}${BOLD}Successfully created EROFS image: $OUTPUT_IMG${RESET}"
-            echo -e "${BLUE}Image size: $(du -h "$OUTPUT_IMG" | cut -f1)${RESET}"
         fi
         ;;
-
-    2)
-        # EXT4 flow
-        MOUNT_POINT="${TEMP_ROOT}/ext4_mount"
-        mkdir -p "$MOUNT_POINT"
-
-        echo -e "\n${BLUE}${BOLD}Select EXT4 Repack Mode:${RESET}"
-        echo -e "1. Strict (clone original image structure exactly - for repair)"
-        echo -e "2. Flexible (auto-resize if content is larger - for customization)"
-        read -p "Enter your choice [1-2]: " REPACK_MODE
-
+    ext4)
+        MOUNT_POINT="${TEMP_ROOT}/ext4_mount"; mkdir -p "$MOUNT_POINT"
+        if [ -z "$EXT4_MODE" ]; then
+            echo -e "\n${BLUE}${BOLD}Select EXT4 Repack Mode:${RESET}"; echo "1. Strict"; echo "2. Flexible"
+            read -p "Choice [1-2]: " choice; [ "$choice" == "1" ] && EXT4_MODE="strict" || EXT4_MODE="flexible"
+        fi
         ORIGINAL_IMAGE=$(grep "SOURCE_IMAGE" "${REPACK_INFO}/metadata.txt" | awk -F'=' '{print $2}')
         ORIGINAL_FS_TYPE=$(grep "FILESYSTEM_TYPE" "${REPACK_INFO}/metadata.txt" | awk -F'=' '{print $2}')
-
         if [ "$ORIGINAL_FS_TYPE" == "ext4" ]; then
-            ORIGINAL_BLOCK_COUNT=$(get_fs_param "$ORIGINAL_IMAGE" "Block count")
-            ORIGINAL_INODE_COUNT=$(get_fs_param "$ORIGINAL_IMAGE" "Inode count")
+            ORIGINAL_BLOCK_COUNT=$(get_fs_param "$ORIGINAL_IMAGE" "Block count"); ORIGINAL_INODE_COUNT=$(get_fs_param "$ORIGINAL_IMAGE" "Inode count")
             ORIGINAL_CAPACITY=$((ORIGINAL_BLOCK_COUNT * 4096))
-            
-            # Corrected find command to properly exclude the .repack_info directory from the count.
-            CURRENT_INODE_COUNT=$(find "$EXTRACT_DIR" -path "${EXTRACT_DIR}/.repack_info" -prune -o -print | wc -l)
-            # Subtract 1 to not count the top-level EXTRACT_DIR itself.
-            CURRENT_INODE_COUNT=$((CURRENT_INODE_COUNT - 1))
-            
+            CURRENT_INODE_COUNT=$(find "$EXTRACT_DIR" -path "${EXTRACT_DIR}/.repack_info" -prune -o -print | wc -l); CURRENT_INODE_COUNT=$((CURRENT_INODE_COUNT - 1))
             CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
         fi
-
-        if [ "$REPACK_MODE" == "1" ]; then
-            echo -e "\n${YELLOW}${BOLD}Strict mode selected. Verifying source filesystem and content...${RESET}\n"
-
-            if [ "$ORIGINAL_FS_TYPE" != "ext4" ]; then
-                echo -e "\n${RED}${BOLD}Error: Strict mode is only available when the source image is also ext4.${RESET}"
-                echo -e "${RED}The source for this project was '${ORIGINAL_FS_TYPE}'. Please choose Flexible mode.${RESET}"
-                exit 1
-            fi
-            
-            # Use a small safety buffer for inodes.
+        REPACK_LOGIC="create_new"
+        if [ "$EXT4_MODE" == "strict" ]; then
+            if [ "$ORIGINAL_FS_TYPE" != "ext4" ]; then echo -e "${RED}Strict mode requires original to be ext4.${RESET}"; exit 1; fi
             INODE_CHECK_COUNT=$((CURRENT_INODE_COUNT + 5))
-
             if [ "$CURRENT_CONTENT_SIZE" -gt "$ORIGINAL_CAPACITY" ] || [ "$INODE_CHECK_COUNT" -gt "$ORIGINAL_INODE_COUNT" ]; then
-                echo -e "\n${RED}${BOLD}Error: Content has grown beyond the original image's limits.${RESET}"
-                if [ "$CURRENT_CONTENT_SIZE" -gt "$ORIGINAL_CAPACITY" ]; then
-                    original_hr=$(numfmt --to=iec-i --suffix=B "$ORIGINAL_CAPACITY")
-                    current_hr=$(numfmt --to=iec-i --suffix=B "$CURRENT_CONTENT_SIZE")
-                    echo -e "${RED}- New content size ($current_hr) is too large for the original partition ($original_hr).${RESET}"
-                fi
-                if [ "$INODE_CHECK_COUNT" -gt "$ORIGINAL_INODE_COUNT" ]; then
-                    echo -e "${RED}- The number of files/folders ($CURRENT_INODE_COUNT) exceeds the original partition's capacity ($ORIGINAL_INODE_COUNT).${RESET}"
-                fi
-                echo -e "${YELLOW}Strict mode cannot be used. Please choose Flexible mode to create a larger image.${RESET}"
-                exit 1
+                echo -e "${RED}Content too large for strict mode. Use flexible mode.${RESET}"; exit 1
             fi
-            
-            echo -e "${GREEN}Content fits. Cloning original filesystem structure...${RESET}"
-            cp "$ORIGINAL_IMAGE" "$OUTPUT_IMG"
-            mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
-            (cd "$MOUNT_POINT" && find . -mindepth 1 ! -name 'lost+found' -delete)
-        
-        else # Flexible Mode
-            echo -e "\n${YELLOW}${BOLD}Flexible mode selected. Analyzing source...${RESET}\n"
-
-            if [ "$ORIGINAL_FS_TYPE" == "ext4" ]; then
-                # Use a more generous buffer for flexible mode.
-                INODE_CHECK_COUNT=$((CURRENT_INODE_COUNT + 100))
-
-                if [ "$CURRENT_CONTENT_SIZE" -le "$ORIGINAL_CAPACITY" ] && [ "$INODE_CHECK_COUNT" -le "$ORIGINAL_INODE_COUNT" ]; then
-                    echo -e "${GREEN}Content size and file count fit. Cloning original structure for efficiency.${RESET}"
-                    cp "$ORIGINAL_IMAGE" "$OUTPUT_IMG"
-                    mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
-                    (cd "$MOUNT_POINT" && find . -mindepth 1 ! -name 'lost+found' -delete)
-                else
-                    REASON=""
-                    if [ "$CURRENT_CONTENT_SIZE" -gt "$ORIGINAL_CAPACITY" ]; then REASON="content is larger"; fi
-                    if [ "$INODE_CHECK_COUNT" -gt "$ORIGINAL_INODE_COUNT" ]; then
-                        if [ -n "$REASON" ]; then REASON="$REASON and "; fi
-                        REASON="${REASON}it has more files"
-                    fi
-
-                    echo -e "${YELLOW}Creating new image because the ${REASON}. Using original as blueprint...${RESET}"
-                    UUID=$(get_fs_param "$ORIGINAL_IMAGE" "Filesystem UUID")
-                    VOLUME_NAME=$(get_fs_param "$ORIGINAL_IMAGE" "Filesystem volume name")
-                    INODE_SIZE=$(get_fs_param "$ORIGINAL_IMAGE" "Inode size")
-                    FEATURES=$(tune2fs -l "$ORIGINAL_IMAGE" | grep "Filesystem features:" | awk -F':' '{print $2}' | xargs | sed 's/ /,/g')
-                    HASH_SEED=$(get_fs_param "$ORIGINAL_IMAGE" "Directory Hash Seed")
-                    
-                    SIZE_WITH_OVERHEAD=$(echo "($CURRENT_CONTENT_SIZE * 1.25) + (32 * 1024 * 1024)" | bc)
-                    BLOCK_COUNT=$(echo "($SIZE_WITH_OVERHEAD + 4095) / 4096" | bc)
-                    
-                    echo -e "${BLUE}New Block count: $BLOCK_COUNT${RESET}"
-                    dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$BLOCK_COUNT" status=none
-                    mkfs.ext4 -q -b 4096 -I "$INODE_SIZE" -U "$UUID" -L "$VOLUME_NAME" -O "$FEATURES" -E "hash_seed=$HASH_SEED" "$OUTPUT_IMG"
-                    mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
-                fi
-            else # Fallback: Source is not ext4
-                echo -e "${BLUE}Source is not ext4. Creating a new generic ext4 image...${RESET}"
-                CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
-                SIZE_WITH_OVERHEAD=$(echo "($CURRENT_CONTENT_SIZE * 1.25) + (32 * 1024 * 1024)" | bc)
-                BLOCK_COUNT=$(echo "($SIZE_WITH_OVERHEAD + 4095) / 4096" | bc)
-                
-                echo -e "${BLUE}Calculated Block count: $BLOCK_COUNT${RESET}"
-                dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$BLOCK_COUNT" status=none
-                mkfs.ext4 -q "$OUTPUT_IMG"
-                mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+            REPACK_LOGIC="clone"
+        elif [ "$ORIGINAL_FS_TYPE" == "ext4" ]; then # Flexible mode with ext4 original
+            INODE_CHECK_COUNT=$((CURRENT_INODE_COUNT + 100))
+            if [ "$CURRENT_CONTENT_SIZE" -le "$ORIGINAL_CAPACITY" ] && [ "$INODE_CHECK_COUNT" -le "$ORIGINAL_INODE_COUNT" ]; then
+                REPACK_LOGIC="clone"
             fi
         fi
 
-        # --- Common part for all EXT4 paths: Refill and Finalize ---
+        if [ "$REPACK_LOGIC" == "clone" ]; then
+            echo -e "${GREEN}Content fits. Cloning original structure for efficiency.${RESET}"
+            cp "$ORIGINAL_IMAGE" "$OUTPUT_IMG"; mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+            (cd "$MOUNT_POINT" && find . -mindepth 1 ! -name 'lost+found' -delete)
+        else
+            echo -e "${YELLOW}Creating new image...${RESET}"
+            if [ "$ORIGINAL_FS_TYPE" == "ext4" ]; then
+                UUID=$(get_fs_param "$ORIGINAL_IMAGE" "Filesystem UUID"); VOLUME_NAME=$(get_fs_param "$ORIGINAL_IMAGE" "Filesystem volume name"); INODE_SIZE=$(get_fs_param "$ORIGINAL_IMAGE" "Inode size")
+                FEATURES=$(tune2fs -l "$ORIGINAL_IMAGE" | grep "Filesystem features:" | awk -F':' '{print $2}' | xargs | sed 's/ /,/g'); HASH_SEED=$(get_fs_param "$ORIGINAL_IMAGE" "Directory Hash Seed")
+            fi
+            SIZE_WITH_OVERHEAD=$(echo "($CURRENT_CONTENT_SIZE * 1.25) + (32 * 1024 * 1024)" | bc); BLOCK_COUNT=$(echo "($SIZE_WITH_OVERHEAD + 4095) / 4096" | bc)
+            echo -e "${BLUE}New Block count: $BLOCK_COUNT${RESET}"; dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$BLOCK_COUNT" status=none
+            mkfs.ext4 -q -b 4096 ${INODE_SIZE:+-I "$INODE_SIZE"} ${UUID:+-U "$UUID"} ${VOLUME_NAME:+-L "$VOLUME_NAME"} ${FEATURES:+-O "$FEATURES"} ${HASH_SEED:+-E "hash_seed=$HASH_SEED"} "$OUTPUT_IMG"
+            mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+        fi
         echo -e "\n${BLUE}Copying files to image...${RESET}"
-        # CORRECTED TAR COMMAND: --exclude comes BEFORE the path argument '.'
         (cd "$EXTRACT_DIR" && tar --selinux --exclude=.repack_info -cf - .) | (cd "$MOUNT_POINT" && tar --selinux -xf -) &
         show_copy_progress "$EXTRACT_DIR" "$MOUNT_POINT"
         wait $!
-        
-        verify_modifications "$MOUNT_POINT"
-        restore_attributes "$MOUNT_POINT"
-        remove_repack_info "$MOUNT_POINT"
-        
-        echo -e "${BLUE}Unmounting image...${RESET}"
-        sync && umount "$MOUNT_POINT"
-        
+        verify_modifications "$MOUNT_POINT"; restore_attributes "$MOUNT_POINT"; remove_repack_info "$MOUNT_POINT"
+        echo -e "${BLUE}Unmounting image...${RESET}"; sync && umount "$MOUNT_POINT"
         e2fsck -yf "$OUTPUT_IMG" >/dev/null 2>/dev/null
-        [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"
-
         echo -e "\n${GREEN}${BOLD}Successfully created EXT4 image: $OUTPUT_IMG${RESET}"
-        echo -e "${BLUE}Image size: $(stat -c %s "$OUTPUT_IMG" | numfmt --to=iec-i --suffix=B)${RESET}"
-
         ;;
-        
-    *)
-        echo -e "${RED}Invalid choice. Exiting.${RESET}"
-        exit 1
-        ;;
+    *) echo -e "${RED}Invalid choice. Exiting.${RESET}"; exit 1 ;;
 esac
 
-# Transfer ownership back to actual user
-if [ -n "$SUDO_USER" ]; then
-    chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"
-fi
-
-# Disable the trap for a clean, successful exit
+if [ -n "$SUDO_USER" ]; then chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"; fi
 trap - INT TERM EXIT
 cleanup
-
-echo -e "\n${GREEN}${BOLD}Done!${RESET}"
+if [ "$NO_BANNER" = false ]; then echo -e "\n${GREEN}${BOLD}Done!${RESET}"; fi
