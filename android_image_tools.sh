@@ -24,6 +24,21 @@ print_banner() {
     echo -e "${RESET}"
 }
 
+print_usage() {
+    # If an argument was passed to this function, it's the invalid one.
+    if [ -n "$1" ]; then
+        echo -e "\n${RED}${BOLD}Error: Invalid argument '$1'${RESET}"
+    fi
+    
+    local script_name
+    script_name=$(basename "$0")
+    
+    echo -e "\n${YELLOW}Usage:${RESET}"
+    echo -e "  Interactive Mode: ${BOLD}sudo ./${script_name}${RESET}"
+    echo -e "  Non-Interactive:  ${BOLD}sudo ./${script_name} --conf=<path_to_config_file>${RESET}"
+    exit 1
+}
+
 cleanup_and_exit() {
     tput cnorm # Ensure cursor is always visible on exit
     echo -e "\n${YELLOW}Exiting Android Image Tools.${RESET}"
@@ -540,6 +555,13 @@ if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}This script requires root privileges. Please run with sudo.${RESET}"; exit 1
 fi
 
+# Check for any arguments. If arguments exist, they must be valid.
+# The script accepts either 0 arguments (interactive) or 1 valid argument (non-interactive).
+if [ "$#" -gt 1 ] || { [ -n "$1" ] && [[ "$1" != "--conf="* ]]; }; then
+    print_usage "$1"
+fi
+
+# Handle the valid non-interactive case
 if [[ "$1" == "--conf="* ]]; then
     conf_file="${1#*=}"
     if [ ! -f "$conf_file" ]; then
@@ -552,6 +574,7 @@ if [[ "$1" == "--conf="* ]]; then
     exit 0
 fi
 
+# If we passed the checks and there were no arguments, start the interactive loop.
 set +e
 while true; do
     clear; print_banner
