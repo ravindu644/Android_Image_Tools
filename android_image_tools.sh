@@ -234,11 +234,29 @@ select_option() {
 }
 
 select_item() {
-    local header="$1"; local search_path="$2"; local item_type="$3"; local items=(); local find_args=()
+    local header="$1"
+    local search_path="$2"
+    local item_type="$3"
+    local items=()
+    local find_args=()
+
     case "$item_type" in
-        file) find_args=(-type f) ;;
-        dir) find_args=(-type d) ;;
-        *) find_args=\( -type f -o -type d \) ;;
+        image_file)
+            # Find only files (-type f) with the .img extension
+            find_args=(-type f -name '*.img')
+            ;;
+        dir)
+            # Find only directories
+            find_args=(-type d)
+            ;;
+        file)
+            # A generic fallback for any file type (not currently used)
+            find_args=(-type f)
+            ;;
+        *)
+            # A generic fallback for any file or directory
+            find_args=\( -type f -o -type d \)
+            ;;
     esac
     
     while IFS= read -r item; do
@@ -246,7 +264,10 @@ select_item() {
     done < <(find "$search_path" -mindepth 1 -maxdepth 1 "${find_args[@]}" 2>/dev/null)
     
     if [ ${#items[@]} -eq 0 ]; then
-        clear; print_banner; echo -e "\n${YELLOW}Warning: No items found in '${search_path}'.${RESET}"; read -rp $'\nPress Enter to return...'; return 1
+        clear; print_banner
+        echo -e "\n${YELLOW}Warning: No items of type '${item_type}' found in '${search_path}'.${RESET}"
+        read -rp $'\nPress Enter to return...'
+        return 1
     fi
     
     items+=("Back to Main Menu")
@@ -358,25 +379,46 @@ cleanup_workspace() {
 }
 
 run_unpack_interactive() {
-    local input_image output_dir; local step=1
+    local input_image
+    local output_dir
+    local step=1
+    
     while true; do
         case $step in
             1)
-                select_item "Step 1: Select image to unpack:" "INPUT_IMAGES" "file"; if [ $? -ne 0 ]; then return; fi
-                input_image="$AIT_SELECTED_ITEM"; step=2;;
+                # Use the new 'image_file' type to filter for *.img
+                select_item "Step 1: Select image to unpack:" "INPUT_IMAGES" "image_file"
+                if [ $? -ne 0 ]; then
+                    return
+                fi
+                input_image="$AIT_SELECTED_ITEM"
+                step=2
+                ;;
             2)
-                local default_output_dir="EXTRACTED_IMAGES/extracted_$(basename "$input_image" .img)"; clear; print_banner; echo
+                local default_output_dir="EXTRACTED_IMAGES/extracted_$(basename "$input_image" .img)"
+                clear; print_banner; echo
                 read -rp "$(echo -e ${BLUE}"Step 2: Enter output directory path [${BOLD}${default_output_dir}${BLUE}]: "${RESET})" output_dir
-                output_dir=${output_dir:-$default_output_dir}; step=3;;
+                output_dir=${output_dir:-$default_output_dir}
+                step=3
+                ;;
             3)
-                clear; print_banner; echo -e "\n${BOLD}Unpack Operation Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $input_image\n  - ${YELLOW}Output Directory:${RESET} $output_dir"
+                clear; print_banner
+                echo -e "\n${BOLD}Unpack Operation Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $input_image\n  - ${YELLOW}Output Directory:${RESET} $output_dir"
                 select_option "Proceed with this operation?" "Proceed" "Back" --no-clear
-                if [ "$AIT_CHOICE_INDEX" -eq 1 ]; then step=1; continue; fi
-                echo -e "\n${RED}${BOLD}Starting unpack. DO NOT INTERRUPT...${RESET}"; trap '' INT
+                if [ "$AIT_CHOICE_INDEX" -eq 1 ]; then
+                    step=1
+                    continue
+                fi
+                
+                echo -e "\n${RED}${BOLD}Starting unpack. DO NOT INTERRUPT...${RESET}"
+                trap '' INT
                 set -e; bash "$UNPACK_SCRIPT_PATH" "$input_image" "$output_dir" --no-banner; set +e
                 trap 'cleanup_and_exit' INT TERM EXIT
+                
                 echo -e "\n${GREEN}${BOLD}Unpack successful. Files are in: $output_dir${RESET}"
-                read -rp $'\nPress Enter to return...'; break;;
+                read -rp $'\nPress Enter to return...'
+                break
+                ;;
         esac
     done
 }
