@@ -340,7 +340,7 @@ cleanup_workspace() {
     echo -e "\n${BLUE}Cleaning workspace directories...${RESET}"
     for dir in "${dirs_to_scan[@]}"; do
         if [ -d "$dir" ]; then
-            echo -e "  - Deleting contents of ${BOLD}$dir${RESET} (excluding .gitkeep)..."
+            echo -e "  - Deleting contents of ${BOLD}$dir${RESET}"
             find "$dir" -mindepth 1 -not -name '.gitkeep' -delete
         fi
     done
