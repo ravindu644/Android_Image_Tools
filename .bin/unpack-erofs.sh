@@ -186,6 +186,13 @@ handle_shared_blocks() {
     fi
 }
 
+# Function to get original filesystem parameters (robust and universal)
+get_fs_param() {
+    # This robustly extracts the value after the colon, trims whitespace,
+    # and takes the first "word", which is the actual numerical value or keyword.
+    tune2fs -l "$1" 2>/dev/null | grep -E "^$2:" | awk -F':' '{print $2}' | xargs | awk '{print $1}'
+}
+
 # Register cleanup function to run on script exit or interrupt
 trap cleanup EXIT INT TERM
 
@@ -357,13 +364,32 @@ echo "SOURCE_IMAGE=$IMAGE_FILE" >> "${REPACK_INFO}/metadata.txt"
 SOURCE_FS_TYPE=$(findmnt -n -o FSTYPE --target "$MOUNT_DIR")
 echo "FILESYSTEM_TYPE=$SOURCE_FS_TYPE" >> "${REPACK_INFO}/metadata.txt"
 
+# Proactively save EXT4 metadata for super image workflow
+if [ "$SOURCE_FS_TYPE" == "ext4" ]; then
+    if [ "$INTERACTIVE_MODE" = true ] || [ "$NO_BANNER" != true ]; then
+      echo -e "${BLUE}Source is EXT4, saving original filesystem parameters...${RESET}"
+    fi
+    
+    mounted_image=$(findmnt -n -o SOURCE --target "$MOUNT_DIR")
+    
+    echo "ORIGINAL_BLOCK_COUNT=$(get_fs_param "$mounted_image" "Block count")" >> "${REPACK_INFO}/metadata.txt"
+    echo "ORIGINAL_INODE_COUNT=$(get_fs_param "$mounted_image" "Inode count")" >> "${REPACK_INFO}/metadata.txt"
+    echo "ORIGINAL_UUID=$(get_fs_param "$mounted_image" "Filesystem UUID")" >> "${REPACK_INFO}/metadata.txt"
+    echo "ORIGINAL_VOLUME_NAME=$(get_fs_param "$mounted_image" "Filesystem volume name")" >> "${REPACK_INFO}/metadata.txt"
+    echo "ORIGINAL_INODE_SIZE=$(get_fs_param "$mounted_image" "Inode size")" >> "${REPACK_INFO}/metadata.txt"
+    FEATURES=$(tune2fs -l "$mounted_image" 2>/dev/null | grep "Filesystem features:" | awk -F':' '{print $2}' | xargs | sed 's/ /,/g')
+    echo "ORIGINAL_FEATURES=$FEATURES" >> "${REPACK_INFO}/metadata.txt"
+fi
+
 # Verify extraction
 if [ $? -eq 0 ]; then
-  echo -e "\n${GREEN}Extraction completed successfully.${RESET}"
-  echo -e "${BOLD}Files extracted to: ${EXTRACT_DIR}${RESET}"
-  echo -e "${BOLD}Repack info stored in: ${REPACK_INFO}${RESET}"
-  echo -e "${BOLD}File contexts saved to: ${FILE_CONTEXTS_FILE}${RESET}"
-  echo -e "${BOLD}FS config saved to: ${FS_CONFIG_FILE}${RESET}\n"
+  if [ "$INTERACTIVE_MODE" = true ] || [ "$NO_BANNER" != true ]; then
+    echo -e "\n${GREEN}Extraction completed successfully.${RESET}"
+    echo -e "${BOLD}Files extracted to: ${EXTRACT_DIR}${RESET}"
+    echo -e "${BOLD}Repack info stored in: ${REPACK_INFO}${RESET}"
+    echo -e "${BOLD}File contexts saved to: ${FILE_CONTEXTS_FILE}${RESET}"
+    echo -e "${BOLD}FS config saved to: ${FS_CONFIG_FILE}${RESET}\n"
+  fi
 
   # Transfer ownership to actual user
   if [ -n "$SUDO_USER" ]; then
@@ -377,7 +403,11 @@ fi
 # Unmount the image
 if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
   umount "$MOUNT_DIR"
-  echo -e "\n${GREEN}Image unmounted successfully.${RESET}"
+  if [ "$INTERACTIVE_MODE" = true ] || [ "$NO_BANNER" != true ]; then
+    echo -e "\n${GREEN}Image unmounted successfully.${RESET}"
+  fi
 fi
 
-echo -e "\n${GREEN}${BOLD}Done!${RESET}"
+if [ "$INTERACTIVE_MODE" = true ] || [ "$NO_BANNER" != true ]; then
+    echo -e "\n${GREEN}${BOLD}Done!${RESET}"
+fi

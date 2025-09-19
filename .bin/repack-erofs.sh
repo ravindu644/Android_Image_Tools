@@ -500,7 +500,6 @@ case $FS_CHOICE in
         ;;
 
     ext4)
-        # EXT4 flow
         MOUNT_POINT="${TEMP_ROOT}/ext4_mount"
         mkdir -p "$MOUNT_POINT"
 
@@ -516,28 +515,44 @@ case $FS_CHOICE in
             esac
         fi
 
-        ORIGINAL_IMAGE=$(grep "SOURCE_IMAGE" "${REPACK_INFO}/metadata.txt" | awk -F'=' '{print $2}')
-        ORIGINAL_FS_TYPE=$(grep "FILESYSTEM_TYPE" "${REPACK_INFO}/metadata.txt" | awk -F'=' '{print $2}')
+        # Prioritize pre-saved metadata for super image workflow ---
+        # First, source the metadata file. This loads all saved variables.
+        source "${REPACK_INFO}/metadata.txt"
 
-        if [ "$ORIGINAL_FS_TYPE" == "ext4" ]; then
-            ORIGINAL_BLOCK_COUNT=$(get_fs_param "$ORIGINAL_IMAGE" "Block count")
-            ORIGINAL_INODE_COUNT=$(get_fs_param "$ORIGINAL_IMAGE" "Inode count")
+        # Check if the critical variables were loaded from the metadata file.
+        if [ -z "$ORIGINAL_BLOCK_COUNT" ] || [ -z "$ORIGINAL_INODE_COUNT" ]; then
+            # Fallback for old unpacks: try to read the original image file directly.
+            echo -e "${YELLOW}Pre-saved EXT4 params not found, reading from original source image...${RESET}"
+            if [ -f "$SOURCE_IMAGE" ]; then
+                ORIGINAL_BLOCK_COUNT=$(get_fs_param "$SOURCE_IMAGE" "Block count")
+                ORIGINAL_INODE_COUNT=$(get_fs_param "$SOURCE_IMAGE" "Inode count")
+                
+                # Also need to get these for flexible mode fallback
+                ORIGINAL_UUID=$(get_fs_param "$SOURCE_IMAGE" "Filesystem UUID")
+                ORIGINAL_VOLUME_NAME=$(get_fs_param "$SOURCE_IMAGE" "Filesystem volume name")
+                ORIGINAL_INODE_SIZE=$(get_fs_param "$SOURCE_IMAGE" "Inode size")
+                ORIGINAL_FEATURES=$(tune2fs -l "$SOURCE_IMAGE" | grep "Filesystem features:" | awk -F':' '{print $2}' | xargs | sed 's/ /,/g')
+            else
+                echo -e "${RED}Error: Could not find pre-saved EXT4 params or the original source image at '$SOURCE_IMAGE'.${RESET}"
+                echo -e "${YELLOW}Cannot use 'Strict' mode. Please try 'Flexible' or re-unpack the image with the latest script.${RESET}"
+                exit 1
+            fi
+        fi
+
+        # This check can only happen after we have loaded the original parameters
+        if [ "$FILESYSTEM_TYPE" == "ext4" ]; then
             ORIGINAL_CAPACITY=$((ORIGINAL_BLOCK_COUNT * 4096))
-            
-            # Corrected find command to properly exclude the .repack_info directory from the count.
             CURRENT_INODE_COUNT=$(find "$EXTRACT_DIR" -path "${EXTRACT_DIR}/.repack_info" -prune -o -print | wc -l)
-            # Subtract 1 to not count the top-level EXTRACT_DIR itself.
             CURRENT_INODE_COUNT=$((CURRENT_INODE_COUNT - 1))
-            
             CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
         fi
 
         if [ "$EXT4_MODE" == "strict" ]; then
             echo -e "\n${YELLOW}${BOLD}Strict mode selected. Verifying source filesystem and content...${RESET}\n"
 
-            if [ "$ORIGINAL_FS_TYPE" != "ext4" ]; then
+            if [ "$FILESYSTEM_TYPE" != "ext4" ]; then
                 echo -e "\n${RED}${BOLD}Error: Strict mode is only available when the source image is also ext4.${RESET}"
-                echo -e "${RED}The source for this project was '${ORIGINAL_FS_TYPE}'. Please choose Flexible mode.${RESET}"
+                echo -e "${RED}The source for this project was '${FILESYSTEM_TYPE}'. Please choose Flexible mode.${RESET}"
                 exit 1
             fi
             
@@ -558,23 +573,23 @@ case $FS_CHOICE in
                 exit 1
             fi
             
-            echo -e "${GREEN}Content fits. Cloning original filesystem structure...${RESET}"
-            cp "$ORIGINAL_IMAGE" "$OUTPUT_IMG"
+            echo -e "${GREEN}Content fits. Creating new image with original filesystem parameters...${RESET}"
+            dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$ORIGINAL_BLOCK_COUNT" status=none
+            mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$OUTPUT_IMG"
             mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
-            (cd "$MOUNT_POINT" && find . -mindepth 1 ! -name 'lost+found' -delete)
         
         else # Flexible Mode
             echo -e "\n${YELLOW}${BOLD}Flexible mode selected. Analyzing source...${RESET}\n"
 
-            if [ "$ORIGINAL_FS_TYPE" == "ext4" ]; then
+            if [ "$FILESYSTEM_TYPE" == "ext4" ]; then
                 # Use a more generous buffer for flexible mode.
                 INODE_CHECK_COUNT=$((CURRENT_INODE_COUNT + 100))
 
                 if [ "$CURRENT_CONTENT_SIZE" -le "$ORIGINAL_CAPACITY" ] && [ "$INODE_CHECK_COUNT" -le "$ORIGINAL_INODE_COUNT" ]; then
-                    echo -e "${GREEN}Content size and file count fit. Cloning original structure for efficiency.${RESET}"
-                    cp "$ORIGINAL_IMAGE" "$OUTPUT_IMG"
+                    echo -e "${GREEN}Content fits. Creating new image with original parameters for efficiency.${RESET}"
+                    dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$ORIGINAL_BLOCK_COUNT" status=none
+                    mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$OUTPUT_IMG"
                     mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
-                    (cd "$MOUNT_POINT" && find . -mindepth 1 ! -name 'lost+found' -delete)
                 else
                     REASON=""
                     if [ "$CURRENT_CONTENT_SIZE" -gt "$ORIGINAL_CAPACITY" ]; then REASON="content is larger"; fi
@@ -583,19 +598,15 @@ case $FS_CHOICE in
                         REASON="${REASON}it has more files"
                     fi
 
-                    echo -e "${YELLOW}Creating new image because the ${REASON}. Using original as blueprint...${RESET}"
-                    UUID=$(get_fs_param "$ORIGINAL_IMAGE" "Filesystem UUID")
-                    VOLUME_NAME=$(get_fs_param "$ORIGINAL_IMAGE" "Filesystem volume name")
-                    INODE_SIZE=$(get_fs_param "$ORIGINAL_IMAGE" "Inode size")
-                    FEATURES=$(tune2fs -l "$ORIGINAL_IMAGE" | grep "Filesystem features:" | awk -F':' '{print $2}' | xargs | sed 's/ /,/g')
-                    HASH_SEED=$(get_fs_param "$ORIGINAL_IMAGE" "Directory Hash Seed")
+                    echo -e "${YELLOW}Creating larger image because the ${REASON}. Using original as blueprint...${RESET}"
                     
+                    # Calculate new size with a 25% overhead plus a 32MB safety margin
                     SIZE_WITH_OVERHEAD=$(echo "($CURRENT_CONTENT_SIZE * 1.25) + (32 * 1024 * 1024)" | bc)
                     BLOCK_COUNT=$(echo "($SIZE_WITH_OVERHEAD + 4095) / 4096" | bc)
                     
                     echo -e "${BLUE}New Block count: $BLOCK_COUNT${RESET}"
                     dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$BLOCK_COUNT" status=none
-                    mkfs.ext4 -q -b 4096 -I "$INODE_SIZE" -U "$UUID" -L "$VOLUME_NAME" -O "$FEATURES" -E "hash_seed=$HASH_SEED" "$OUTPUT_IMG"
+                    mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$OUTPUT_IMG"
                     mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
                 fi
             else # Fallback: Source is not ext4
@@ -613,7 +624,6 @@ case $FS_CHOICE in
 
         # --- Common part for all EXT4 paths: Refill and Finalize ---
         echo -e "\n${BLUE}Copying files to image...${RESET}"
-        # CORRECTED TAR COMMAND: --exclude comes BEFORE the path argument '.'
         (cd "$EXTRACT_DIR" && tar --selinux --exclude=.repack_info -cf - .) | (cd "$MOUNT_POINT" && tar --selinux -xf -) &
         show_copy_progress "$EXTRACT_DIR" "$MOUNT_POINT"
         wait $!

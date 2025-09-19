@@ -11,10 +11,8 @@ TMP_DIR="" # Will be set by the script
 
 # Locate the script's own directory to find the local bin folder.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-BIN_DIR="${SCRIPT_DIR}/bin"
+BIN_DIR="${SCRIPT_DIR}" # Modified by user for .bin structure
 
-# If a local bin directory exists, add it to the beginning of the PATH.
-# This makes the script use the local tools before any system-wide ones.
 if [ -d "$BIN_DIR" ]; then
     export PATH="$BIN_DIR:$PATH"
 fi
@@ -36,7 +34,6 @@ print_banner() {
     echo -e "${RESET}"
 }
 
-# --- MODIFIED: Added --raw flag documentation ---
 print_usage() {
     echo -e "\n${RED}${BOLD}Usage: $0 <unpack|repack> [options]${RESET}"
     echo
@@ -65,7 +62,7 @@ check_dependencies() {
     fi
 }
 
-# --- Unpack Logic (Unchanged) ---
+# --- Unpack Logic ---
 parse_lpdump_and_save_config() {
     local lpdump_file="$1"
     local config_file="$2"
@@ -149,13 +146,12 @@ run_unpack() {
     echo -e "  - Logical partitions and config stored in: ${BOLD}${output_dir}/${RESET}"
 }
 
-# --- MODIFIED: Repack Logic ---
+# --- Repack Logic ---
 run_repack() {
     local session_dir="$1"
     local output_image="$2"
-    local raw_flag="$3" # The third argument, if it exists
+    local raw_flag="$3"
 
-    # Default to creating a sparse image
     local create_sparse=true
     if [ "$raw_flag" == "--raw" ]; then
         create_sparse=false
@@ -169,7 +165,7 @@ run_repack() {
         echo -e "${RED}Error: Invalid session directory or missing 'repack_info.txt'.${RESET}"; exit 1
     fi
     
-    echo -e "\n${BLUE}Starting repack process using session: ${BOLD}${session_dir}...${RESET}${RESET}"
+    echo -e "\n${BLUE}Starting repack process using session: ${BOLD}${session_dir}...${RESET}"
     source "$config_file"
 
     local cmd="lpmake"
@@ -216,7 +212,6 @@ run_repack() {
         done
     done
     
-    # Conditionally add the --sparse flag
     if [ "$create_sparse" = true ]; then
         cmd+=" --sparse"
     fi
@@ -236,42 +231,66 @@ run_repack() {
 }
 
 
-# --- MODIFIED: Main Execution Logic ---
-if [ "$#" -lt 1 ]; then
-    print_usage
-fi
+# --- START OF NEW, ROBUST MAIN EXECUTION LOGIC ---
 
-ACTION="$1"
+# Initialize variables for arguments and flags
+ACTION=""
+ARGS=()
+INTERACTIVE_MODE=true
 
+# Parse arguments and flags
+while (( "$#" )); do
+  case "$1" in
+    --no-banner)
+      INTERACTIVE_MODE=false
+      shift
+      ;;
+    -*)
+      echo -e "${RED}Error: Unknown option $1${RESET}" >&2
+      print_usage
+      ;;
+    *)
+      if [ -z "$ACTION" ]; then
+        ACTION="$1"
+      else
+        ARGS+=("$1")
+      fi
+      shift
+      ;;
+  esac
+done
+
+# Validate action
 if [ "$ACTION" != "unpack" ] && [ "$ACTION" != "repack" ]; then
-    print_banner
-    echo -e "${RED}Error: Invalid action '${ACTION}'. Please use 'unpack' or 'repack'.${RESET}"
+    if [ "$INTERACTIVE_MODE" = true ]; then print_banner; fi
+    echo -e "${RED}Error: Invalid action. Please use 'unpack' or 'repack'.${RESET}"
     print_usage
 fi
 
-# Argument count validation is now more flexible for the repack command
-if [ "$ACTION" == "unpack" ] && [ "$#" -ne 3 ]; then
-    print_banner
-    echo -e "${RED}Error: 'unpack' requires exactly 2 arguments.${RESET}"
+# Validate argument counts for each action
+if [ "$ACTION" == "unpack" ] && [ "${#ARGS[@]}" -ne 2 ]; then
+    if [ "$INTERACTIVE_MODE" = true ]; then print_banner; fi
+    echo -e "${RED}Error: 'unpack' requires exactly 2 arguments: <super_image> and <output_directory>.${RESET}"
     print_usage
 fi
-if [ "$ACTION" == "repack" ] && { [ "$#" -ne 3 ] && [ "$#" -ne 4 ]; }; then
-    print_banner
-    echo -e "${RED}Error: 'repack' requires 2 arguments, with an optional '--raw' flag.${RESET}"
+if [ "$ACTION" == "repack" ] && { [ "${#ARGS[@]}" -ne 2 ] && [ "${#ARGS[@]}" -ne 3 ]; }; then
+    if [ "$INTERACTIVE_MODE" = true ]; then print_banner; fi
+    echo -e "${RED}Error: 'repack' requires 2 arguments with an optional '--raw' flag.${RESET}"
     print_usage
 fi
 
-shift
-print_banner
+# Conditionally print banner and run main logic
+if [ "$INTERACTIVE_MODE" = true ]; then
+    print_banner
+fi
 check_dependencies
 
 case "$ACTION" in
     unpack)
-        run_unpack "$1" "$2"
+        run_unpack "${ARGS[0]}" "${ARGS[1]}"
         ;;
     repack)
-        # Pass all remaining arguments to the function
-        run_repack "$@"
+        run_repack "${ARGS[0]}" "${ARGS[1]}" "${ARGS[2]}"
         ;;
 esac
 
