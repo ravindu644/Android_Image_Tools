@@ -282,16 +282,23 @@ select_item() {
 }
 
 export_repack_config() {
-    local source_dir="$1"; local output_image="$2"; local fs="$3"; local repack_mode="$4"; local erofs_comp="$5"; local erofs_level="$6"; local create_sparse="$7"
+    local source_dir="$1"
+    local output_image="$2"
+    local fs="$3"
+    local repack_mode="$4"
+    local erofs_comp="$5"
+    local erofs_level="$6"
+    local create_sparse="$7"
     
     mkdir -p "CONFIGS"
-    clear; print_banner
+    clear
+    print_banner
     
     local partition_name
     partition_name=$(basename "$source_dir" | sed 's/^extracted_//')
     local default_conf_name="${partition_name}_repack.conf"
     
-    read -rp "$(echo -e ${BLUE}"Enter a filename for the preset [${BOLD}${default_conf_name}${BLUE}]: "${RESET})" conf_filename
+    read -rp "$(echo -e ${BLUE}"Enter filename for preset [${BOLD}${default_conf_name}${BLUE}]: "${RESET})" conf_filename
     conf_filename=${conf_filename:-$default_conf_name}
     
     local final_conf_path="CONFIGS/$conf_filename"
@@ -300,6 +307,7 @@ export_repack_config() {
     local full_output_path
     full_output_path="$(realpath "$(dirname "$output_image")")/$(basename "$output_image")"
     
+    # Write the main configuration values
     cat > "$final_conf_path" <<EOF
 # --- Android Image Tools Repack Configuration ---
 # Generated on $(date)
@@ -311,12 +319,19 @@ FILESYSTEM=$fs
 CREATE_SPARSE_IMAGE=$create_sparse
 EOF
 
+    # Conditionally append filesystem-specific settings
     if [ "$fs" == "erofs" ]; then
         cat >> "$final_conf_path" <<EOF
 # --- EROFS Settings ---
 COMPRESSION_MODE=${erofs_comp:-none}
+EOF
+        # --- FIX ---
+        # Only write the COMPRESSION_LEVEL if the mode is lz4hc or deflate
+        if [[ "$erofs_comp" == "lz4hc" || "$erofs_comp" == "deflate" ]]; then
+            cat >> "$final_conf_path" <<EOF
 COMPRESSION_LEVEL=${erofs_level:-9}
 EOF
+        fi
     else
         cat >> "$final_conf_path" <<EOF
 # --- EXT4 Settings ---
