@@ -7,8 +7,8 @@
 trap 'cleanup_and_exit' INT TERM EXIT
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-UNPACK_SCRIPT_PATH="${SCRIPT_DIR}/unpack-erofs.sh"
-REPACK_SCRIPT_PATH="${SCRIPT_DIR}/repack-erofs.sh"
+UNPACK_SCRIPT_PATH="${SCRIPT_DIR}/.bin/unpack-erofs.sh"
+REPACK_SCRIPT_PATH="${SCRIPT_DIR}/.bin/repack-erofs.sh"
 
 WORKSPACE_DIRS=("INPUT_IMAGES" "EXTRACTED_IMAGES" "REPACKED_IMAGES")
 
