@@ -272,6 +272,12 @@ select_item() {
     local find_args=()
 
     case "$item_type" in
+
+        # This one specifically excludes any file starting with 'super'
+        single_partition_image)
+            find_args=(-type f \( -name '*.img' -o -name '*.img.raw' \) -not -name 'super*.img')
+            ;;
+        # This one is for finding ALL images, including super.img
         image_file)
             find_args=(-type f \( -name '*.img' -o -name '*.img.raw' \))
             ;;
@@ -423,11 +429,12 @@ run_unpack_interactive() {
     while true; do
         case $step in
             1)
-                # Use the new 'image_file' type to filter for *.img
-                select_item "Step 1: Select image to unpack:" "INPUT_IMAGES" "image_file"
+                # Safer item type to hide super.img
+                select_item "Step 1: Select image to unpack:" "INPUT_IMAGES" "single_partition_image"
                 if [ $? -ne 0 ]; then
                     return
                 fi
+
                 input_image="$AIT_SELECTED_ITEM"
                 step=2
                 ;;
