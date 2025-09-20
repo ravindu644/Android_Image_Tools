@@ -181,7 +181,6 @@ run_repack() {
     fi
 
     session_dir=${session_dir%/}
-    # Config is now expected in the parent's .metadata directory
     local config_file="${session_dir}/../.metadata/super_repack_info.txt"
 
     if [ ! -d "$session_dir" ] || [ ! -f "$config_file" ]; then
@@ -204,6 +203,8 @@ run_repack() {
         exit 1
     fi
 
+    local total_partitions_size=0
+
     for group in $LP_GROUPS; do
         local group_partitions_var="LP_GROUP_${group}_PARTITIONS"
         local partitions="${!group_partitions_var}"
@@ -225,6 +226,8 @@ run_repack() {
             total_group_size=$((total_group_size + size))
         done
         
+        total_partitions_size=$((total_partitions_size + total_group_size))
+        
         cmd+=" --group ${group}:${total_group_size}"
         
         for part in $partitions; do
@@ -232,6 +235,19 @@ run_repack() {
             cmd+=" --image ${part}=${session_dir}/${part}.img"
         done
     done
+    
+    if [ "$total_partitions_size" -gt "$SUPER_DEVICE_SIZE" ]; then
+        local total_hr
+        total_hr=$(numfmt --to=iec-i --suffix=B "$total_partitions_size")
+        local device_hr
+        device_hr=$(numfmt --to=iec-i --suffix=B "$SUPER_DEVICE_SIZE")
+        
+        echo -e "\n${RED}${BOLD}FATAL ERROR: The combined size of your repacked partitions is larger than the super device can hold.${RESET}"
+        echo -e "  - Total Partition Size: ${YELLOW}${total_hr}${RESET}"
+        echo -e "  - Super Device Capacity:  ${YELLOW}${device_hr}${RESET}"
+        echo -e "\n${RED}To fix this, you need to either modify your project to remove the bloat or use the 'EROFS' filesystem with lz4/lz4hc compression for the logical partitions.${RESET}"
+        exit 1
+    fi
     
     if [ "$create_sparse" = true ]; then
         cmd+=" --sparse"
