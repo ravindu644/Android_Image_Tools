@@ -26,14 +26,9 @@ print_banner() {
 }
 
 print_usage() {
-    # If an argument was passed to this function, it's the invalid one.
-    if [ -n "$1" ]; then
-        echo -e "\n${RED}${BOLD}Error: Invalid argument '$1'${RESET}"
-    fi
-    
+    if [ -n "$1" ]; then echo -e "\n${RED}${BOLD}Error: Invalid argument '$1'${RESET}"; fi
     local script_name
     script_name=$(basename "$0")
-    
     echo -e "\n${YELLOW}Usage:${RESET}"
     echo -e "  Interactive Mode: ${BOLD}sudo ./${script_name}${RESET}"
     echo -e "  Non-Interactive:  ${BOLD}sudo ./${script_name} --conf=<path_to_config_file>${RESET}"
@@ -41,9 +36,7 @@ print_usage() {
 }
 
 sudo_cleanup_temp_dirs() {
-    # This function is specifically for removing root-owned temp directories
     local temp_dirs
-    # Use find with -print0 and xargs for safety with special characters
     temp_dirs=$(find /tmp -mindepth 1 -maxdepth 1 \( -name "repack-*" -o -name "*_mount" -o -name "*_raw.img" -o -name "super_unpack_*" -o -name "ait_super_*" \) -print0 2>/dev/null)
     if [ -n "$temp_dirs" ]; then
         echo "$temp_dirs" | xargs -0 sudo rm -rf
@@ -51,10 +44,10 @@ sudo_cleanup_temp_dirs() {
 }
 
 cleanup_and_exit() {
-    tput cnorm # Ensure cursor is always visible on exit
+    tput cnorm
     sudo_cleanup_temp_dirs
     echo -e "\n${YELLOW}Exiting Android Image Tools.${RESET}"
-    exit 130 # Standard exit code for Ctrl+C
+    exit 130
 }
 
 check_distro() {
@@ -158,11 +151,20 @@ generate_config_file() {
 # USAGE: sudo ./android_image_tools.sh --conf=your_config.conf
 #
 # --- [DOCUMENTATION] ---
-# ACTION: "unpack" or "repack". (Mandatory)
+# ACTION: "unpack", "repack", "super_unpack", or "super_repack". (Mandatory)
+#
+# == For single partitions ==
 # INPUT_IMAGE: Image in 'INPUT_IMAGES' to unpack.
 # EXTRACT_DIR: Directory name for extracted files in 'EXTRACTED_IMAGES'.
 # SOURCE_DIR: Source directory in 'EXTRACTED_IMAGES' to repack.
 # OUTPUT_IMAGE: Output filename in 'REPACKED_IMAGES'.
+#
+# == For super partitions ==
+# PROJECT_NAME: The name of the project folder inside 'SUPER_TOOLS'.
+#   - For super_unpack: The name of the project to create.
+#   - For super_repack: The name of the existing project to repack.
+#
+# == General Repack Settings ==
 # FILESYSTEM: "ext4" or "erofs".
 # CREATE_SPARSE_IMAGE: "true" to create a flashable .sparse.img, "false" for raw .img.
 # COMPRESSION_MODE: For erofs - "none", "lz4", "lz4hc", "deflate".
@@ -186,13 +188,8 @@ EOF
 
 display_final_image_size() {
     local image_path="$1"
-    if [ ! -f "$image_path" ]; then
-        return
-    fi
-    
+    if [ ! -f "$image_path" ]; then return; fi
     local file_size
-    # Use stat to get the true logical size, and numfmt for correct IEC units (MiB).
-    # This is now consistent with the repack script.
     file_size=$(stat -c %s "$image_path" | numfmt --to=iec-i --suffix=B --padding=7)
     echo -e "\n${GREEN}${BOLD}Final Image Size: ${file_size}${RESET}"
 }
@@ -369,10 +366,12 @@ EOF
     read -rp $'\nPress Enter to return to the summary...'
 }
 
+# --- In android_image_tools.sh ---
+
+# --- START: REPLACE THIS ENTIRE FUNCTION ---
 cleanup_workspace() {
     clear; print_banner
     
-    # --- MODIFIED: Add SUPER_TOOLS to cleanup ---
     local total_bytes=0
     local dirs_to_scan=("${WORKSPACE_DIRS[@]}" "CONFIGS")
     local workspace_bytes
@@ -383,7 +382,6 @@ cleanup_workspace() {
     
     temp_files_list=$(find /tmp -mindepth 1 -maxdepth 1 \( -name "repack-*" -o -name "*_mount" -o -name "*_raw.img" -o -name "super_unpack_*" -o -name "ait_super_*" \) 2>/dev/null)
     if [ -n "$temp_files_list" ]; then
-
         local temp_bytes
         temp_bytes=$(echo "$temp_files_list" | xargs du -sb 2>/dev/null | awk '{s+=$1} END {print s}')
         total_bytes=$((total_bytes + ${temp_bytes:-0}))
@@ -518,7 +516,7 @@ run_repack_interactive() {
     done
 }
 
-# --- START OF NEW SUPER KITCHEN FUNCTIONS ---
+# --- START OF REVISED SUPER KITCHEN FUNCTIONS ---
 run_super_unpack_interactive() {
     local super_image session_name project_dir metadata_dir logical_dir extracted_dir
 
@@ -614,61 +612,123 @@ run_super_unpack_interactive() {
     read -rp $'\nPress Enter to return...'
 }
 
+# --- REVISED: This function is now fully navigable and produces a cleaner config ---
 run_super_create_config_interactive() {
-    local project_dir metadata_dir part_config_file
+    local project_dir metadata_dir final_config_file
 
-    select_item "Select project to configure:" "SUPER_TOOLS" "dir"
+    select_item "Select project to finalize configuration:" "SUPER_TOOLS" "dir"
     if [ $? -ne 0 ]; then return; fi
-
     project_dir="$AIT_SELECTED_ITEM"
-    metadata_dir="${project_dir}/.metadata"
-    part_config_file="${metadata_dir}/partitions_repack.conf"
     
-    if [ ! -f "${metadata_dir}/partition_list.txt" ]; then
-        echo -e "\n${RED}Error: Metadata is missing for this project. Cannot configure.${RESET}"; sleep 2; return
+    metadata_dir="${project_dir}/.metadata"
+    final_config_file="${project_dir}/project.conf"
+
+    if [ ! -f "${metadata_dir}/partition_list.txt" ] || [ ! -f "${metadata_dir}/super_repack_info.txt" ]; then
+        echo -e "\n${RED}Error: Core metadata is missing for this project. Cannot configure.${RESET}"; sleep 2; return
     fi
     
     local partition_list
     readarray -t partition_list < "${metadata_dir}/partition_list.txt"
     
-    echo "# Repack settings for project: $(basename "$project_dir")" > "$part_config_file"
-    echo "PARTITION_LIST=\"${partition_list[*]}\"" >> "$part_config_file"
-    echo "" >> "$part_config_file"
-
-    for part_name in "${partition_list[@]}"; do
-        clear; print_banner
-        echo -e "\n${BOLD}Configuring partition: [ ${YELLOW}$part_name${BOLD} ]${RESET}"
+    declare -A config_lines
+    
+    local current_index=0
+    while [ "$current_index" -lt "${#partition_list[@]}" ]; do
+        local part_name=${partition_list[$current_index]}
         
-        # Filesystem selection
-        select_option "Select filesystem for '${part_name}':" "EROFS" "EXT4"
+        clear; print_banner
+        echo -e "\n${BOLD}Configuring partition ($((current_index + 1))/${#partition_list[@]}): [ ${YELLOW}$part_name${BOLD} ]${RESET}"
+        
+        local menu_options=("EROFS" "EXT4")
+        if [ "$current_index" -gt 0 ]; then
+            menu_options+=("Back to previous partition")
+        fi
+
+        select_option "Select filesystem for '${part_name}':" "${menu_options[@]}"
+        
+        if [ "$current_index" -gt 0 ] && [ "$AIT_CHOICE_INDEX" -eq 2 ]; then
+            current_index=$((current_index - 1))
+            continue
+        fi
+        
         local fs
         [ "$AIT_CHOICE_INDEX" -eq 0 ] && fs="erofs" || fs="ext4"
-        echo "${part_name^^}_FS=\"$fs\"" >> "$part_config_file"
+        config_lines["${part_name^^}_FS"]="$fs"
 
-        if [ "$fs" == "erofs" ]; then
-            select_option "Select EROFS compression for '${part_name}':" "none" "lz4" "lz4hc" "deflate"
-            local erofs_comp_options=("none" "lz4" "lz4hc" "deflate")
-            local erofs_comp=${erofs_comp_options[$AIT_CHOICE_INDEX]}
-            echo "${part_name^^}_EROFS_COMPRESSION=\"$erofs_comp\"" >> "$part_config_file"
-            
-            if [[ "$erofs_comp" == "lz4hc" || "$erofs_comp" == "deflate" ]]; then
-                clear; print_banner; echo
-                read -rp "$(echo -e ${BLUE}"Enter level for ${erofs_comp} (lz4hc 0-12, deflate 0-9): "${RESET})" erofs_level
-                echo "${part_name^^}_EROFS_LEVEL=\"$erofs_level\"" >> "$part_config_file"
+        # Proactively clear ALL old settings for this partition before proceeding.
+        # This prevents old values (like EROFS_LEVEL) from sticking around.
+        unset "config_lines[${part_name^^}_EROFS_COMPRESSION]"
+        unset "config_lines[${part_name^^}_EROFS_LEVEL]"
+        unset "config_lines[${part_name^^}_EXT4_MODE]"
+
+        while true; do
+            clear; print_banner
+            echo -e "\n${BOLD}Configuring partition ($((current_index + 1))/${#partition_list[@]}): [ ${YELLOW}$part_name${BOLD} ]${RESET}"
+            echo -e "  - Filesystem: ${GREEN}${fs}${RESET}"
+
+            if [ "$fs" == "erofs" ]; then
+                select_option "Select EROFS compression:" "none" "lz4" "lz4hc" "deflate" "Back"
+                if [ "$AIT_CHOICE_INDEX" -eq 4 ]; then break; fi
+                
+                local erofs_comp_options=("none" "lz4" "lz4hc" "deflate")
+                local erofs_comp=${erofs_comp_options[$AIT_CHOICE_INDEX]}
+                config_lines["${part_name^^}_EROFS_COMPRESSION"]="$erofs_comp"
+                
+                if [[ "$erofs_comp" == "lz4hc" || "$erofs_comp" == "deflate" ]]; then
+                    read -rp "$(echo -e ${BLUE}"Enter level for ${erofs_comp} (lz4hc 0-12, deflate 0-9): "${RESET})" erofs_level
+                    config_lines["${part_name^^}_EROFS_LEVEL"]="$erofs_level"
+                fi
+                current_index=$((current_index + 1))
+                break
+            else # EXT4
+                select_option "Select EXT4 repack mode:" "Flexible (Recommended)" "Strict" "Back"
+                if [ "$AIT_CHOICE_INDEX" -eq 2 ]; then break; fi
+
+                local ext4_mode
+                [ "$AIT_CHOICE_INDEX" -eq 0 ] && ext4_mode="flexible" || ext4_mode="strict"
+                config_lines["${part_name^^}_EXT4_MODE"]="$ext4_mode"
+                current_index=$((current_index + 1))
+                break
             fi
-        else # EXT4
-            select_option "Select EXT4 repack mode for '${part_name}':" "Flexible (Recommended)" "Strict"
-            local ext4_mode
-            [ "$AIT_CHOICE_INDEX" -eq 0 ] && ext4_mode="flexible" || ext4_mode="strict"
-            echo "${part_name^^}_EXT4_MODE=\"$ext4_mode\"" >> "$part_config_file"
-        fi
-        echo "" >> "$part_config_file"
+        done
     done
     
-    echo -e "\n${GREEN}${BOLD}[✓] Repack configuration saved successfully to:${RESET}\n${part_config_file}"
+    {
+        echo "# --- Universal Repack Configuration ---"
+        echo "# Project: $(basename "$project_dir")"
+        echo "# Generated on $(date)"
+        echo "# WARNING: Do NOT edit this file manually unless you know what you are doing."
+        echo ""
+        
+        echo "# --- Super Partition Metadata ---"
+        grep -v -E '^(#|$)' "${metadata_dir}/super_repack_info.txt"
+        echo ""
+        
+        echo "# --- Logical Partition Repack Settings ---"
+        echo "PARTITION_LIST=\"${partition_list[*]}\""
+        echo ""
+
+        for part_name in "${partition_list[@]}"; do
+            echo "# Settings for ${part_name}"
+            echo "${part_name^^}_FS=\"${config_lines[${part_name^^}_FS]}\""
+            if [ "${config_lines[${part_name^^}_FS]}" == "erofs" ]; then
+                echo "${part_name^^}_EROFS_COMPRESSION=\"${config_lines[${part_name^^}_EROFS_COMPRESSION]}\""
+                if [ -n "${config_lines[${part_name^^}_EROFS_LEVEL]}" ]; then
+                    echo "${part_name^^}_EROFS_LEVEL=\"${config_lines[${part_name^^}_EROFS_LEVEL]}\""
+                fi
+            else
+                echo "${part_name^^}_EXT4_MODE=\"${config_lines[${part_name^^}_EXT4_MODE]}\""
+            fi
+            echo ""
+        done
+    } > "$final_config_file"
+
+    echo -e "\n${GREEN}${BOLD}[✓] Universal repack configuration saved to:${RESET}\n${final_config_file}"
+    
     read -rp $'\nPress Enter to return...'
 }
 
+# --- REVISED: This function now uses the universal project.conf ---
 run_super_repack_interactive() {
     local project_dir metadata_dir part_config_file logical_dir extracted_dir
 
@@ -679,11 +739,11 @@ run_super_repack_interactive() {
     metadata_dir="${project_dir}/.metadata"
     logical_dir="${project_dir}/logical_partitions"
     extracted_dir="${project_dir}/extracted_content"
-    part_config_file="${metadata_dir}/partitions_repack.conf"
+    part_config_file="${project_dir}/project.conf"
 
     if [ ! -f "$part_config_file" ]; then
-        echo -e "\n${RED}Error: Repack configuration not found!${RESET}"
-        echo -e "Please run 'Create Repack Configuration' for this project first."
+        echo -e "\n${RED}Error: Universal 'project.conf' not found!${RESET}"
+        echo -e "Please run 'Finalize Project Configuration' for this project first."
         sleep 3; return
     fi
     
@@ -698,7 +758,7 @@ run_super_repack_interactive() {
     local sparse_flag=""
     [ "$AIT_CHOICE_INDEX" -eq 1 ] && sparse_flag="--raw"
 
-    echo -e "\n${RED}${BOLD}Starting full super repack. DO NOT INTERRUPT...${RESET}"
+    echo -e "\n${RED}${BOLD}Starting full super repack. This will take a long time...${RESET}"
     trap '' INT
     set -e
     
@@ -719,8 +779,7 @@ run_super_repack_interactive() {
         local fs="${!fs_var}"
         local repack_args=("--fs" "$fs")
         if [ "$fs" == "erofs" ]; then
-            local comp_var="${part_name^^}_EROFS_COMPRESSION"
-            local level_var="${part_name^^}_EROFS_LEVEL"
+            local comp_var="${part_name^^}_EROFS_COMPRESSION"; local level_var="${part_name^^}_EROFS_LEVEL"
             [ -n "${!comp_var}" ] && repack_args+=("--erofs-compression" "${!comp_var}")
             [ -n "${!level_var}" ] && repack_args+=("--erofs-level" "${!level_var}")
         else
@@ -728,6 +787,7 @@ run_super_repack_interactive() {
             [ -n "${!mode_var}" ] && repack_args+=("--ext4-mode" "${!mode_var}")
         fi
         
+        # --- CRITICAL FIX: Re-implemented the spinner logic ---
         bash "$REPACK_SCRIPT_PATH" "${extracted_dir}/${part_name}" "${logical_dir}/${part_name}.img" "${repack_args[@]}" --no-banner >/dev/null 2>&1 &
         local pid=$!
         
@@ -753,15 +813,14 @@ run_super_repack_interactive() {
     fi
     
     echo -e "\n${BLUE}--- Assembling final super image ---${RESET}"
-    # Show the final lpmake output as it is informative
     bash "$SUPER_SCRIPT_PATH" repack "$logical_dir" "$output_image" "$sparse_flag" --no-banner
     
     rm -rf "$logical_dir"
+    set +e
     trap 'cleanup_and_exit' INT TERM EXIT
     
     echo -e "\n${GREEN}${BOLD}Super repack successful!${RESET}"
     echo -e "  - Final image: ${BOLD}$output_image${RESET}"
-    echo -e "  - Repacked Partitions: ${BOLD}${total}${RESET} (${PARTITION_LIST})"
     display_final_image_size "$output_image"
     read -rp $'\nPress Enter to return...'
 }
@@ -769,7 +828,7 @@ run_super_repack_interactive() {
 run_super_kitchen_menu() {
     while true; do
         clear; print_banner
-        local kitchen_options=("Unpack a Super Image" "Create Repack Configuration" "Repack a Project from Configuration" "Back to Main Menu")
+        local kitchen_options=("Unpack a Super Image" "Finalize Project Configuration" "Repack a Project from Configuration" "Back to Main Menu")
         select_option "Super Image Kitchen:" "${kitchen_options[@]}"
         
         case $AIT_CHOICE_INDEX in
@@ -794,12 +853,15 @@ run_advanced_tools_menu() {
     done
 }
 
-# --- END OF NEW SUPER KITCHEN FUNCTIONS ---
-
+# --- REVISED: The main non-interactive function now handles super actions ---
 run_non_interactive() {
-    set -e; local config_file="$1"; echo -e "\n${BLUE}Running non-interactive with: ${BOLD}$config_file${RESET}"; declare -A CONFIG
+    set -e
+    local config_file="$1"
+    echo -e "\n${BLUE}Running non-interactive with: ${BOLD}$config_file${RESET}"
+    declare -A CONFIG
     while IFS='=' read -r key value; do if [[ ! "$key" =~ ^\# && -n "$key" ]]; then CONFIG["$key"]="$value"; fi; done < "$config_file"
-    ACTION="${CONFIG[ACTION]}"; if [ -z "$ACTION" ]; then echo -e "${RED}Error: 'ACTION' not defined.${RESET}"; exit 1; fi
+    ACTION="${CONFIG[ACTION]}"
+    if [ -z "$ACTION" ]; then echo -e "${RED}Error: 'ACTION' not defined.${RESET}"; exit 1; fi
     trap '' INT
 
     if [ "$ACTION" == "unpack" ]; then
@@ -837,6 +899,73 @@ run_non_interactive() {
         else
             echo -e "\n${RED}${BOLD}Repack failed.${RESET}"
         fi
+        
+    # --- NEW: Non-interactive super unpack ---
+    elif [ "$ACTION" == "super_unpack" ]; then
+        local input_image="${CONFIG[INPUT_IMAGE]}"
+        local project_name="${CONFIG[PROJECT_NAME]}"
+        if [[ "$input_image" != /* ]]; then input_image="INPUT_IMAGES/$input_image"; fi
+        if [ -z "$input_image" ] || [ -z "$project_name" ]; then echo -e "${RED}Error: INPUT_IMAGE/PROJECT_NAME not set.${RESET}"; exit 1; fi
+        
+        local project_dir="SUPER_TOOLS/$project_name"
+        if [ -d "$project_dir" ]; then echo -e "${RED}Error: Project '$project_name' already exists.${RESET}"; exit 1; fi
+
+        echo -e "\n${BOLD}Super Unpack Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $input_image\n  - ${YELLOW}Project Name:${RESET} $project_name"
+        echo -e "\n${RED}${BOLD}Starting super unpack...${RESET}"
+        
+        # Mirror the interactive logic
+        mkdir -p "$project_dir/.metadata" "$project_dir/logical_partitions" "$project_dir/extracted_content"
+        bash "$SUPER_SCRIPT_PATH" unpack "$input_image" "$project_dir/logical_partitions" --no-banner &>/dev/null
+        
+        find "$project_dir/logical_partitions" -maxdepth 1 -type f -name '*.img' ! -name 'super.raw.img' | while read -r logical_img; do
+            local part_name
+            part_name=$(basename "$logical_img" .img)
+            echo -e "--- Unpacking logical partition: ${part_name} ---"
+            bash "$UNPACK_SCRIPT_PATH" "$logical_img" "$project_dir/extracted_content/${part_name}" --no-banner &>/dev/null
+        done
+        rm -rf "$project_dir/logical_partitions"
+        echo -e "\n${GREEN}${BOLD}Success: Super image unpacked to $project_dir${RESET}"
+
+    # --- NEW: Non-interactive super repack ---
+    elif [ "$ACTION" == "super_repack" ]; then
+        local project_name="${CONFIG[PROJECT_NAME]}"
+        local output_image="${CONFIG[OUTPUT_IMAGE]}"
+        if [[ "$output_image" != /* ]]; then output_image="REPACKED_IMAGES/$output_image"; fi
+        if [ -z "$project_name" ] || [ -z "$output_image" ]; then echo -e "${RED}Error: PROJECT_NAME/OUTPUT_IMAGE not set.${RESET}"; exit 1; fi
+
+        local project_dir="SUPER_TOOLS/$project_name"
+        local final_config_file="${project_dir}/project.conf"
+        if [ ! -f "$final_config_file" ]; then echo -e "${RED}Error: 'project.conf' not found in '$project_dir'.${RESET}"; exit 1; fi
+        
+        source "$final_config_file"
+        echo -e "\n${BOLD}Super Repack Summary:${RESET}\n  - ${YELLOW}Project:${RESET} $project_name\n  - ${YELLOW}Output Image:${RESET} $output_image"
+        echo -e "\n${RED}${BOLD}Starting super repack...${RESET}"
+        
+        local logical_dir="${project_dir}/logical_partitions"
+        mkdir -p "$logical_dir"
+        
+        for part_name in $PARTITION_LIST; do
+            echo "--- Repacking logical partition: ${part_name} ---"
+            local fs_var="${part_name^^}_FS"; local fs="${!fs_var}"
+            local repack_args=("--fs" "$fs")
+            if [ "$fs" == "erofs" ]; then
+                local comp_var="${part_name^^}_EROFS_COMPRESSION"; local level_var="${part_name^^}_EROFS_LEVEL"
+                [ -n "${!comp_var}" ] && repack_args+=("--erofs-compression" "${!comp_var}")
+                [ -n "${!level_var}" ] && repack_args+=("--erofs-level" "${!level_var}")
+            else
+                local mode_var="${part_name^^}_EXT4_MODE"; [ -n "${!mode_var}" ] && repack_args+=("--ext4-mode" "${!mode_var}")
+            fi
+            bash "$REPACK_SCRIPT_PATH" "$project_dir/extracted_content/${part_name}" "$logical_dir/${part_name}.img" "${repack_args[@]}" --no-banner &>/dev/null
+        done
+
+        echo "--- Assembling final super image ---"
+        local sparse_flag=""
+        [ "${CONFIG[CREATE_SPARSE_IMAGE]}" == "false" ] && sparse_flag="--raw"
+        bash "$SUPER_SCRIPT_PATH" repack "$logical_dir" "$output_image" "$sparse_flag" --no-banner &>/dev/null
+        rm -rf "$logical_dir"
+        
+        echo -e "\n${GREEN}${BOLD}Success: Final image created at: ${output_image}${RESET}"
+        display_final_image_size "$output_image"
     else
         echo -e "${RED}Error: Invalid ACTION '${ACTION}'.${RESET}"; exit 1
     fi
