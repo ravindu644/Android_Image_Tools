@@ -8,6 +8,7 @@ OUTPUT_IMG=""
 # Default values for non-interactive mode
 FS_CHOICE=""
 EXT4_MODE=""
+EXT4_OVERHEAD_PERCENT="" # Now empty by default
 EROFS_COMP=""
 EROFS_LEVEL=""
 NO_BANNER=false
@@ -24,13 +25,12 @@ else
 fi
 
 # Non-interactive argument parsing
-# This block runs after positional args. If flags are passed, it populates the variables.
-# If no flags are passed, the script will fall back to interactive prompts.
 while [[ $# -gt 0 ]]; do
     key="$1"
     case $key in
         --fs) FS_CHOICE="$2"; shift; shift ;;
         --ext4-mode) EXT4_MODE="$2"; shift; shift ;;
+        --ext4-overhead-percent) EXT4_OVERHEAD_PERCENT="$2"; shift; shift ;;
         --erofs-compression) EROFS_COMP="$2"; shift; shift ;;
         --erofs-level) EROFS_LEVEL="$2"; shift; shift ;;
         --no-banner) NO_BANNER=true; shift ;;
@@ -110,7 +110,7 @@ cleanup() {
         umount "$MOUNT_POINT" 2>/dev/null || umount -l "$MOUNT_POINT" 2>/dev/null
     fi
     
-    # Then remove temporary files    
+    # Then remove temporary files        
     [ -d "$TEMP_ROOT" ] && rm -rf "$TEMP_ROOT"
     [ -f "$OUTPUT_IMG.tmp" ] && rm -f "$OUTPUT_IMG.tmp"
     if [ "$NO_BANNER" = false ]; then
@@ -380,6 +380,110 @@ create_ext4_image_quiet() {
     mount -o loop,rw "$output" "$mount_point" 2>/dev/null
 }
 
+calculate_optimal_ext4_size() {
+    local content_dir="$1"
+    local overhead_percent="${2:-15}"
+    
+    # Send debug output to stderr so it doesn't interfere with return value
+    echo -e "${BLUE}Calculating optimal image size...${RESET}" >&2
+    
+    # Step 1: Get actual content size (excluding .repack_info)
+    local content_bytes=$(du -sb --exclude=.repack_info "$content_dir" | awk '{print $1}')
+    echo -e "${BLUE}├─ Content size: $(numfmt --to=iec-i --suffix=B $content_bytes)${RESET}" >&2
+    
+    # Step 2: Calculate ext4 metadata overhead
+    # Count files and directories for inode calculation
+    local file_count=$(find "$content_dir" -not -path "*/.repack_info/*" | wc -l)
+    local dir_count=$(find "$content_dir" -type d -not -path "*/.repack_info/*" | wc -l)
+    
+    # Calculate required inodes (files + dirs + some buffer for lost+found, etc.)
+    local required_inodes=$((file_count + dir_count + 100))
+    
+    # Ext4 uses 1 inode per 16KB by default, but we'll be more precise
+    local inode_size=256  # Default inode size
+    local block_size=4096
+    
+    # Calculate minimum blocks needed for inodes
+    local inode_table_blocks=$(( (required_inodes * inode_size + block_size - 1) / block_size ))
+    
+    # Calculate ext4 filesystem overhead (approximately 5-7% for metadata)
+    local fs_metadata_overhead=$((content_bytes * 7 / 100))
+    
+    # Step 3: Calculate base filesystem size
+    local base_fs_size=$((content_bytes + fs_metadata_overhead + inode_table_blocks * block_size))
+    
+    echo -e "${BLUE}├─ Metadata overhead: $(numfmt --to=iec-i --suffix=B $fs_metadata_overhead)${RESET}" >&2
+    echo -e "${BLUE}├─ Required inodes: $required_inodes${RESET}" >&2
+    
+    # Step 4: Add user-specified overhead (using integer arithmetic)
+    local user_overhead=$((base_fs_size * overhead_percent / 100))
+    local final_size=$((base_fs_size + user_overhead))
+    
+    # Step 5: Round up to nearest block boundary
+    local final_blocks=$(( (final_size + block_size - 1) / block_size ))
+    local final_size_rounded=$((final_blocks * block_size))
+    
+    echo -e "${BLUE}├─ User overhead (${overhead_percent}%): $(numfmt --to=iec-i --suffix=B $user_overhead)${RESET}" >&2
+    echo -e "${BLUE}└─ Final size: $(numfmt --to=iec-i --suffix=B $final_size_rounded) (${final_blocks} blocks)${RESET}" >&2
+    
+    # Only return the number
+    echo "$final_blocks"
+}
+
+create_ext4_flexible() {
+    local extract_dir="$1"
+    local output_img="$2"
+    local mount_point="$3"
+    local overhead_percent="$4"
+    
+    echo -e "\n${YELLOW}${BOLD}Flexible mode: Calculating optimal image size...${RESET}\n"
+    
+    # Get optimal size using our smart calculation
+    local optimal_blocks=$(calculate_optimal_ext4_size "$extract_dir" "$overhead_percent")
+    
+    echo -e "\n${BLUE}Creating optimally sized ext4 image...${RESET}"
+    
+    # Create the image with calculated size
+    dd if=/dev/zero of="$output_img" bs=4096 count="$optimal_blocks" status=none
+    
+    # Format with optimal settings
+    if [ "$FILESYSTEM_TYPE" == "ext4" ] && [ -n "$ORIGINAL_UUID" ]; then
+        # Preserve original filesystem characteristics when available
+        mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$output_img"
+    else
+        # Use optimized defaults for new filesystem
+        mkfs.ext4 -q -b 4096 -i 16384 -m 1 -O ^has_journal,^resize_inode,dir_index,extent,sparse_super "$output_img"
+    fi
+    
+    # Mount the new filesystem
+    mkdir -p "$mount_point"
+    mount -o loop,rw "$output_img" "$mount_point"
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Error: Failed to mount created image${RESET}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}✓ Image created and mounted successfully${RESET}"
+    
+    # Verify we have enough space
+    local available_space=$(df --output=avail -B1 "$mount_point" | tail -n1)
+    local total_space=$(df --output=size -B1 "$mount_point" | tail -n1)
+    local content_size=$(du -sb --exclude=.repack_info "$extract_dir" | awk '{print $1}')
+    
+    if [ "$available_space" -lt "$content_size" ]; then
+        echo -e "${RED}Error: Insufficient space in created image${RESET}"
+        umount "$mount_point"
+        return 1
+    fi
+    
+    local free_after_copy=$((available_space - content_size))
+    local free_percentage=$(( free_after_copy * 100 / total_space ))
+    echo -e "${BLUE}Available space: $(numfmt --to=iec-i --suffix=B $available_space) (~${free_percentage}% free after copy)${RESET}"
+    
+    return 0
+}
+
 # Function to get original filesystem parameters (robust and universal)
 get_fs_param() {
     local image_file="$1"
@@ -441,9 +545,7 @@ case $FS_CHOICE in
             ;;
           lz4hc)
             if [ -z "$EROFS_LEVEL" ]; then
-                echo -e "\n${BLUE}${BOLD}Select LZ4HC compression level (0-12):${RESET}"
-                echo -e "Default: 9 (higher = better compression but slower)"
-                read -p "Enter compression level: " COMP_LEVEL
+                read -p "$(echo -e ${BLUE}"Enter LZ4HC compression level (0-12, default 9): "${RESET})" COMP_LEVEL
             else
                 COMP_LEVEL="$EROFS_LEVEL"
             fi
@@ -456,10 +558,8 @@ case $FS_CHOICE in
             fi
             ;;
           deflate)
-            if [ -z "$EROFS_LEVEL" ]; then
-                echo -e "\n${BLUE}${BOLD}Select DEFLATE compression level (0-9):${RESET}"
-                echo -e "Default: 1 (higher = better compression but slower)"
-                read -p "Enter compression level: " COMP_LEVEL
+             if [ -z "$EROFS_LEVEL" ]; then
+                read -p "$(echo -e ${BLUE}"Enter DEFLATE compression level (0-9, default 1): "${RESET})" COMP_LEVEL
             else
                 COMP_LEVEL="$EROFS_LEVEL"
             fi
@@ -477,26 +577,21 @@ case $FS_CHOICE in
             ;;
         esac
         
-        # Create the EROFS image with simplest command
         MKFS_CMD="mkfs.erofs"
         if [ -n "$COMPRESSION" ]; then
             MKFS_CMD="$MKFS_CMD $COMPRESSION"
         fi
         MKFS_CMD="$MKFS_CMD $OUTPUT_IMG.tmp $WORK_DIR"
 
-        # Show the command
         echo -e "\n${BLUE}Executing command:${RESET}"
         echo -e "${BOLD}$MKFS_CMD${RESET}\n"
 
-        # Create the EROFS image
         echo -e "${BLUE}Creating EROFS image... This may take some time.${RESET}\n"
         eval $MKFS_CMD
         
-        if [ $? -eq 0 ]; then
-            mv "$OUTPUT_IMG.tmp" "$OUTPUT_IMG"
-            echo -e "\n${GREEN}${BOLD}Successfully created EROFS image: $OUTPUT_IMG${RESET}"
-            echo -e "${BLUE}Image size: $(du -h "$OUTPUT_IMG" | cut -f1)${RESET}"
-        fi
+        mv "$OUTPUT_IMG.tmp" "$OUTPUT_IMG"
+        echo -e "\n${GREEN}${BOLD}Successfully created EROFS image: $OUTPUT_IMG${RESET}"
+        echo -e "${BLUE}Image size: $(stat -c %s "$OUTPUT_IMG" | numfmt --to=iec-i --suffix=B)${RESET}"
         ;;
 
     ext4)
@@ -505,77 +600,67 @@ case $FS_CHOICE in
 
         if [ -z "$EXT4_MODE" ]; then
             echo -e "\n${BLUE}${BOLD}Select EXT4 Repack Mode:${RESET}"
-            echo -e "1. Strict (clone original image structure exactly - for repair)"
-            echo -e "2. Flexible (auto-resize if content is larger - for customization)"
-            read -p "Enter your choice [1-2]: " mode_choice
-            case $mode_choice in
-                1) EXT4_MODE="strict" ;;
-                2) EXT4_MODE="flexible" ;;
-                *) EXT4_MODE="flexible" ;;
-            esac
+            echo -e "1. Strict (clone original image structure)"
+            echo -e "2. Flexible (auto-resize with configurable free space)"
+            read -p "Enter your choice [1-2]: " repack_mode_choice
+            [ "$repack_mode_choice" == "1" ] && EXT4_MODE="strict" || EXT4_MODE="flexible"
         fi
-
+        
+        # Source metadata first to get variables
         source "${REPACK_INFO}/metadata.txt"
 
         if [ -z "$ORIGINAL_BLOCK_COUNT" ]; then
             if [ -f "$SOURCE_IMAGE" ]; then
                 ORIGINAL_BLOCK_COUNT=$(get_fs_param "$SOURCE_IMAGE" "Block count")
             else
-                EXT4_MODE="flexible"
+                if [ "$EXT4_MODE" == "strict" ]; then
+                    echo -e "${YELLOW}Warning: Original image not found. Forcing Flexible mode.${RESET}"
+                    EXT4_MODE="flexible"
+                fi
                 FILESYSTEM_TYPE="unknown"
             fi
         fi
 
-        if [ "$FILESYSTEM_TYPE" == "ext4" ]; then
-            ORIGINAL_CAPACITY=$((ORIGINAL_BLOCK_COUNT * 4096))
-        fi
         CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
         
-        # --- START OF NEW AUTOSIZING LOGIC ---
         if [ "$EXT4_MODE" == "flexible" ]; then
-            echo -e "\n${YELLOW}${BOLD}Flexible mode: Auto-calculating exact required image size...${RESET}\n"
-            
-            # 1. Dry Run: Create an oversized sparse file to determine minimum size.
-            DRY_RUN_IMG="${TEMP_ROOT}/dry_run.img"
-            DRY_RUN_MOUNT="${TEMP_ROOT}/dry_run_mount"
-            mkdir -p "$DRY_RUN_MOUNT"
-            OVERSIZED_BYTES=$((CURRENT_CONTENT_SIZE + 500*1024*1024))
-            truncate -s "$OVERSIZED_BYTES" "$DRY_RUN_IMG"
-            mkfs.ext4 -q -m 0 "$DRY_RUN_IMG"
-            mount -o loop,rw "$DRY_RUN_IMG" "$DRY_RUN_MOUNT"
-            (cd "$EXTRACT_DIR" && tar --selinux --exclude=.repack_info -cf - .) | (cd "$DRY_RUN_MOUNT" && tar --selinux -xf -) >/dev/null 2>&1
-            sync && umount "$DRY_RUN_MOUNT"
-            
-            # 2. Shrink to find the absolute minimum required size.
-            e2fsck -fy "$DRY_RUN_IMG" >/dev/null 2>&1
-            resize2fs -M "$DRY_RUN_IMG" >/dev/null 2>&1
-            min_block_count=$(dumpe2fs -h "$DRY_RUN_IMG" 2>/dev/null | grep 'Block count:' | awk '{print $3}')
-            rm -rf "$DRY_RUN_IMG" "$DRY_RUN_MOUNT"
-            
-            # 3. Calculate the final size with a standard 10% overhead for free space.
-            final_block_count=$(echo "($min_block_count * 1.10) / 1" | bc)
-            
-            echo -e "${BLUE}Minimum blocks required: ${min_block_count}${RESET}"
-            echo -e "${BLUE}Final blocks with overhead: ${final_block_count}${RESET}"
-            
-            # 4. Create the final image with the calculated size.
-            dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$final_block_count" status=none
-            if [ "$FILESYSTEM_TYPE" == "ext4" ]; then
-                 mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$OUTPUT_IMG"
-            else
-                 mkfs.ext4 -q "$OUTPUT_IMG"
+            if [ -z "$EXT4_OVERHEAD_PERCENT" ]; then
+                echo -e "\n${BLUE}${BOLD}Select desired free space overhead:${RESET}"
+                echo -e "1. Standard (10%)"
+                echo -e "2. Recommended (15%)"
+                echo -e "3. Generous (20%)"
+                echo -e "4. Custom"
+                read -p "Enter your choice [1-4, default: 2]: " overhead_choice
+                
+                case $overhead_choice in
+                    1) EXT4_OVERHEAD_PERCENT=10 ;;
+                    3) EXT4_OVERHEAD_PERCENT=20 ;;
+                    4) read -rp "$(echo -e ${BLUE}"Enter custom percentage (e.g., 25): "${RESET})" EXT4_OVERHEAD_PERCENT
+                       if ! [[ "$EXT4_OVERHEAD_PERCENT" =~ ^[0-9]+$ ]]; then
+                           echo -e "${RED}Invalid input. Defaulting to 15%.${RESET}"
+                           EXT4_OVERHEAD_PERCENT=15
+                       fi ;;
+                    *) EXT4_OVERHEAD_PERCENT=15 ;;
+                esac
             fi
-            mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+            
+            # Use the new intelligent approach
+            create_ext4_flexible "$EXTRACT_DIR" "$OUTPUT_IMG" "$MOUNT_POINT" "$EXT4_OVERHEAD_PERCENT"
+            if [ $? -ne 0 ]; then
+                echo -e "${RED}Failed to create flexible ext4 image${RESET}"
+                exit 1
+            fi
 
-        else # Strict mode or Flexible mode where content fits
-            echo -e "\n${GREEN}${BOLD}Content fits original size. Cloning filesystem structure...${RESET}"
+        else # Strict mode
+            if [ "$FILESYSTEM_TYPE" != "ext4" ]; then
+                echo -e "\n${RED}${BOLD}Error: Strict mode is only available when the source image is also ext4.${RESET}"; exit 1
+            fi
+            echo -e "\n${GREEN}${BOLD}Strict mode: Cloning original filesystem structure...${RESET}"
             dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$ORIGINAL_BLOCK_COUNT" status=none
             mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$OUTPUT_IMG"
             mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
         fi
-        # --- END OF NEW AUTOSIZING LOGIC ---
-
-        # --- Common part for all EXT4 paths: Refill and Finalize ---
+        
         echo -e "\n${BLUE}Copying files to final image...${RESET}"
         (cd "$EXTRACT_DIR" && tar --selinux --exclude=.repack_info -cf - .) | (cd "$MOUNT_POINT" && tar --selinux -xf -) &
         show_copy_progress "$EXTRACT_DIR" "$MOUNT_POINT"
@@ -588,12 +673,11 @@ case $FS_CHOICE in
         echo -e "${BLUE}Unmounting image...${RESET}"
         sync && umount "$MOUNT_POINT"
         
-        e2fsck -yf "$OUTPUT_IMG" >/dev/null 2>&1
+        e2fsck -yf "$OUTPUT_IMG" >/dev/null 2>/dev/null
         [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"
 
         echo -e "\n${GREEN}${BOLD}Successfully created EXT4 image: $OUTPUT_IMG${RESET}"
         echo -e "${BLUE}Image size: $(stat -c %s "$OUTPUT_IMG" | numfmt --to=iec-i --suffix=B)${RESET}"
-
         ;;
         
     *)

@@ -169,7 +169,10 @@ generate_config_file() {
 # CREATE_SPARSE_IMAGE: "true" to create a flashable .sparse.img, "false" for raw .img.
 # COMPRESSION_MODE: For erofs - "none", "lz4", "lz4hc", "deflate".
 # COMPRESSION_LEVEL: For erofs lz4hc(0-12) or deflate(0-9).
-# MODE: For ext4 - "flexible" (recommended) or "strict".
+# MODE: For ext4 - "flexible" or "strict".
+#
+# == EXT4 Flexible Mode Settings (Optional) ==
+# EXT4_OVERHEAD_PERCENT: Percentage of free space to add. Default is "5".
 
 # --- Default Settings Begin Here ---
 ACTION=repack
@@ -179,9 +182,8 @@ SOURCE_DIR=extracted_system
 OUTPUT_IMAGE=system_new.img
 FILESYSTEM=ext4
 CREATE_SPARSE_IMAGE=true
-COMPRESSION_MODE=lz4
-COMPRESSION_LEVEL=9
 MODE=flexible
+EXT4_OVERHEAD_PERCENT=5
 EOF
     echo -e "\n${GREEN}${BOLD}[✓] Configuration file generated successfully.${RESET}"
 }
@@ -313,17 +315,10 @@ select_item() {
 }
 
 export_repack_config() {
-    local source_dir="$1"
-    local output_image="$2"
-    local fs="$3"
-    local repack_mode="$4"
-    local erofs_comp="$5"
-    local erofs_level="$6"
-    local create_sparse="$7"
+    local source_dir="$1" output_image="$2" fs="$3" repack_mode="$4" erofs_comp="$5" erofs_level="$6" create_sparse="$7" overhead_percent="$8"
     
     mkdir -p "CONFIGS"
-    clear
-    print_banner
+    clear; print_banner
     
     local partition_name
     partition_name=$(basename "$source_dir" | sed 's/^extracted_//')
@@ -338,35 +333,30 @@ export_repack_config() {
     local full_output_path
     full_output_path="$(realpath "$(dirname "$output_image")")/$(basename "$output_image")"
     
-    cat > "$final_conf_path" <<EOF
-# --- Android Image Tools Repack Configuration ---
-ACTION=repack
-SOURCE_DIR=$full_source_path
-OUTPUT_IMAGE=$full_output_path
-FILESYSTEM=$fs
-CREATE_SPARSE_IMAGE=$create_sparse
-EOF
-
-    if [ "$fs" == "erofs" ]; then
-        cat >> "$final_conf_path" <<EOF
-COMPRESSION_MODE=${erofs_comp:-none}
-EOF
-        if [[ "$erofs_comp" == "lz4hc" || "$erofs_comp" == "deflate" ]]; then
-            cat >> "$final_conf_path" <<EOF
-COMPRESSION_LEVEL=${erofs_level:-9}
-EOF
+    {
+        echo "# --- Android Image Tools Repack Configuration ---"
+        echo "ACTION=repack"
+        echo "SOURCE_DIR=$full_source_path"
+        echo "OUTPUT_IMAGE=$full_output_path"
+        echo "FILESYSTEM=$fs"
+        echo "CREATE_SPARSE_IMAGE=$create_sparse"
+        
+        if [ "$fs" == "erofs" ]; then
+            echo "COMPRESSION_MODE=${erofs_comp:-none}"
+            if [[ "$erofs_comp" == "lz4hc" || "$erofs_comp" == "deflate" ]]; then
+                echo "COMPRESSION_LEVEL=${erofs_level:-9}"
+            fi
+        else
+            echo "MODE=${repack_mode:-flexible}"
+            if [ "$repack_mode" == "flexible" ]; then
+                echo "EXT4_OVERHEAD_PERCENT=${overhead_percent:-5}"
+            fi
         fi
-    else
-        cat >> "$final_conf_path" <<EOF
-MODE=${repack_mode:-flexible}
-EOF
-    fi
+    } > "$final_conf_path"
     
     echo -e "\n${GREEN}${BOLD}[✓] Settings successfully exported to '${final_conf_path}'.${RESET}"
     read -rp $'\nPress Enter to return to the summary...'
 }
-
-# --- In android_image_tools.sh ---
 
 # --- START: REPLACE THIS ENTIRE FUNCTION ---
 cleanup_workspace() {
@@ -454,7 +444,7 @@ run_unpack_interactive() {
                     continue
                 fi
                 
-                echo -e "\n${RED}${BOLD}Starting unpack. DO NOT INTERRUPT...${RESET}"
+                echo -e "\n${RED}${BOLD}Starting unpack. DO NOT INTERRUPT...${RESET}\n"
                 trap '' INT
                 set -e; bash "$UNPACK_SCRIPT_PATH" "$input_image" "$output_dir" --no-banner; set +e
                 trap 'cleanup_and_exit' INT TERM EXIT
@@ -468,7 +458,8 @@ run_unpack_interactive() {
 }
 
 run_repack_interactive() {
-    local source_dir output_image fs repack_mode erofs_comp erofs_level create_sparse; local step=1
+    local source_dir output_image fs repack_mode erofs_comp erofs_level create_sparse overhead_percent
+    local step=1
     while true; do
         case $step in
             1)
@@ -484,22 +475,34 @@ run_repack_interactive() {
             4)
                 if [ "$fs" == "erofs" ]; then
                     local erofs_options=("none" "lz4" "lz4hc" "deflate" "Back"); select_option "Step 4: Select EROFS compression:" "${erofs_options[@]}"; if [ "$AIT_CHOICE_INDEX" -eq 4 ]; then step=3; continue; fi
-                    erofs_comp=${erofs_options[$AIT_CHOICE_INDEX]}; erofs_level=""; if [[ "$erofs_comp" == "lz4hc" || "$erofs_comp" == "deflate" ]]; then clear; print_banner; read -rp "$(echo -e ${BLUE}"Step 4a: Level (lz4hc 0-12, deflate 0-9): "${RESET})" erofs_level; fi
+                    erofs_comp=${erofs_options[$AIT_CHOICE_INDEX]}; erofs_level=""; if [[ "$erofs_comp" == "lz4hc" || "$erofs_comp" == "deflate" ]]; then read -rp "$(echo -e ${BLUE}"Step 4a: Level (lz4hc 0-12, deflate 0-9): "${RESET})" erofs_level; fi
                 else
-                    local ext4_options=("Flexible (Recommended)" "Strict" "Back"); select_option "Step 4: Select EXT4 repack mode:" "${ext4_options[@]}"; if [ "$AIT_CHOICE_INDEX" -eq 2 ]; then step=3; continue; fi
-                    [ "$AIT_CHOICE_INDEX" -eq 0 ] && repack_mode="flexible" || repack_mode="strict"
+                    local ext4_options=("Strict (clone original)" "Flexible (auto-resize)" "Back"); select_option "Step 4: Select EXT4 repack mode:" "${ext4_options[@]}"; if [ "$AIT_CHOICE_INDEX" -eq 2 ]; then step=3; continue; fi
+                    if [ "$AIT_CHOICE_INDEX" -eq 0 ]; then
+                        repack_mode="strict"
+                    else
+                        repack_mode="flexible"
+                        select_option "Select Flexible Overhead:" "Minimal (10%)" "Standard (15%)" "Generous (20%)" "Custom"
+                        case $AIT_CHOICE_INDEX in
+                            0) overhead_percent=10 ;;
+                            2) overhead_percent=20 ;;
+                            3) read -rp "$(echo -e ${BLUE}"Enter custom percentage: "${RESET})" overhead_percent ;;
+                            *) overhead_percent=15 ;;
+                        esac
+                        overhead_percent=${overhead_percent:-15}
+                    fi
                 fi; step=5;;
             5)
                 local sparse_options=("Yes" "No" "Back"); select_option "Step 5: Create a flashable sparse image?" "${sparse_options[@]}";
                 case $AIT_CHOICE_INDEX in 0) create_sparse="true"; step=6;; 1) create_sparse="false"; step=6;; 2) step=4; continue;; esac;;
             6)
                 clear; print_banner; echo -e "\n${BOLD}Repack Operation Summary:${RESET}\n  - ${YELLOW}Source Directory:${RESET} $source_dir\n  - ${YELLOW}Output Image:${RESET}     $output_image\n  - ${YELLOW}Filesystem:${RESET}       $fs"
-                if [ "$fs" == "erofs" ]; then echo -e "  - ${YELLOW}EROFS Compression:${RESET}  $erofs_comp"; if [ -n "$erofs_level" ]; then echo -e "  - ${YELLOW}EROFS Level:${RESET}        ${erofs_level:-default}"; fi; else echo -e "  - ${YELLOW}EXT4 Mode:${RESET}        $repack_mode"; fi
+                if [ "$fs" == "erofs" ]; then echo -e "  - ${YELLOW}EROFS Compression:${RESET}  $erofs_comp"; if [ -n "$erofs_level" ]; then echo -e "  - ${YELLOW}EROFS Level:${RESET}        ${erofs_level:-default}"; fi; else echo -e "  - ${YELLOW}EXT4 Mode:${RESET}        $repack_mode"; if [ "$repack_mode" == "flexible" ]; then echo -e "  - ${YELLOW}EXT4 Overhead:${RESET}      ${overhead_percent}%"; fi; fi
                 echo -e "  - ${YELLOW}Create Sparse IMG:${RESET}  $create_sparse"; select_option "What would you like to do?" "Proceed" "Export selected settings" "Back" --no-clear;
-                case $AIT_CHOICE_INDEX in 0) ;; 1) export_repack_config "$source_dir" "$output_image" "$fs" "$repack_mode" "$erofs_comp" "$erofs_level" "$create_sparse"; step=6; continue;; 2) step=5; continue;; esac
+                case $AIT_CHOICE_INDEX in 0) ;; 1) export_repack_config "$source_dir" "$output_image" "$fs" "$repack_mode" "$erofs_comp" "$erofs_level" "$create_sparse" "$overhead_percent"; step=6; continue;; 2) step=5; continue;; esac
                 
                 echo -e "\n${RED}${BOLD}Starting repack. DO NOT INTERRUPT...${RESET}"; trap '' INT; local repack_args=("--fs" "$fs")
-                if [ "$fs" == "erofs" ]; then repack_args+=("--erofs-compression" "$erofs_comp"); if [ -n "$erofs_level" ]; then repack_args+=("--erofs-level" "$erofs_level"); fi; else repack_args+=("--ext4-mode" "$repack_mode"); fi
+                if [ "$fs" == "erofs" ]; then repack_args+=("--erofs-compression" "$erofs_comp"); if [ -n "$erofs_level" ]; then repack_args+=("--erofs-level" "$erofs_level"); fi; else repack_args+=("--ext4-mode" "$repack_mode"); if [ "$repack_mode" == "flexible" ]; then repack_args+=("--ext4-overhead-percent" "$overhead_percent"); fi; fi
                 
                 set -e; bash "$REPACK_SCRIPT_PATH" "$source_dir" "$output_image" "${repack_args[@]}" --no-banner; set +e; trap 'cleanup_and_exit' INT TERM EXIT; echo
                 
@@ -516,7 +519,7 @@ run_repack_interactive() {
     done
 }
 
-# --- START OF REVISED SUPER KITCHEN FUNCTIONS ---
+# --- Super Kitchen Functions ---
 run_super_unpack_interactive() {
     local super_image session_name project_dir metadata_dir logical_dir extracted_dir
 
@@ -612,8 +615,9 @@ run_super_unpack_interactive() {
     read -rp $'\nPress Enter to return...'
 }
 
-# --- REVISED: This function is now fully navigable and produces a cleaner config ---
+# --- MODIFIED: run_super_create_config_interactive now handles percentage overhead ---
 run_super_create_config_interactive() {
+
     local project_dir metadata_dir final_config_file
 
     select_item "Select project to finalize configuration:" "SUPER_TOOLS" "dir"
@@ -640,10 +644,7 @@ run_super_create_config_interactive() {
         echo -e "\n${BOLD}Configuring partition ($((current_index + 1))/${#partition_list[@]}): [ ${YELLOW}$part_name${BOLD} ]${RESET}"
         
         local menu_options=("EROFS" "EXT4")
-        if [ "$current_index" -gt 0 ]; then
-            menu_options+=("Back to previous partition")
-        fi
-
+        if [ "$current_index" -gt 0 ]; then menu_options+=("Back to previous partition"); fi
         select_option "Select filesystem for '${part_name}':" "${menu_options[@]}"
         
         if [ "$current_index" -gt 0 ] && [ "$AIT_CHOICE_INDEX" -eq 2 ]; then
@@ -655,11 +656,7 @@ run_super_create_config_interactive() {
         [ "$AIT_CHOICE_INDEX" -eq 0 ] && fs="erofs" || fs="ext4"
         config_lines["${part_name^^}_FS"]="$fs"
 
-        # Proactively clear ALL old settings for this partition before proceeding.
-        # This prevents old values (like EROFS_LEVEL) from sticking around.
-        unset "config_lines[${part_name^^}_EROFS_COMPRESSION]"
-        unset "config_lines[${part_name^^}_EROFS_LEVEL]"
-        unset "config_lines[${part_name^^}_EXT4_MODE]"
+        unset "config_lines[${part_name^^}_EROFS_COMPRESSION]" "config_lines[${part_name^^}_EROFS_LEVEL]" "config_lines[${part_name^^}_EXT4_MODE]" "config_lines[${part_name^^}_EXT4_OVERHEAD_TYPE]" "config_lines[${part_name^^}_EXT4_OVERHEAD_VAL]"
 
         while true; do
             clear; print_banner
@@ -669,26 +666,36 @@ run_super_create_config_interactive() {
             if [ "$fs" == "erofs" ]; then
                 select_option "Select EROFS compression:" "none" "lz4" "lz4hc" "deflate" "Back"
                 if [ "$AIT_CHOICE_INDEX" -eq 4 ]; then break; fi
-                
                 local erofs_comp_options=("none" "lz4" "lz4hc" "deflate")
                 local erofs_comp=${erofs_comp_options[$AIT_CHOICE_INDEX]}
                 config_lines["${part_name^^}_EROFS_COMPRESSION"]="$erofs_comp"
-                
                 if [[ "$erofs_comp" == "lz4hc" || "$erofs_comp" == "deflate" ]]; then
                     read -rp "$(echo -e ${BLUE}"Enter level for ${erofs_comp} (lz4hc 0-12, deflate 0-9): "${RESET})" erofs_level
                     config_lines["${part_name^^}_EROFS_LEVEL"]="$erofs_level"
                 fi
-                current_index=$((current_index + 1))
-                break
-            else # EXT4
-                select_option "Select EXT4 repack mode:" "Flexible (Recommended)" "Strict" "Back"
-                if [ "$AIT_CHOICE_INDEX" -eq 2 ]; then break; fi
+                current_index=$((current_index + 1)); break
 
+            else # EXT4
+                select_option "Select EXT4 repack mode:" "Flexible (auto-resize)" "Strict" "Back"
+                if [ "$AIT_CHOICE_INDEX" -eq 2 ]; then break; fi
                 local ext4_mode
-                [ "$AIT_CHOICE_INDEX" -eq 0 ] && ext4_mode="flexible" || ext4_mode="strict"
-                config_lines["${part_name^^}_EXT4_MODE"]="$ext4_mode"
-                current_index=$((current_index + 1))
-                break
+                if [ "$AIT_CHOICE_INDEX" -eq 0 ]; then
+                    ext4_mode="flexible"
+                    config_lines["${part_name^^}_EXT4_MODE"]="$ext4_mode"
+                    select_option "Select Flexible Overhead:" "Minimal (10%)" "Standard (15%)" "Generous (20%)" "Custom"
+                    local overhead_percent
+                    case $AIT_CHOICE_INDEX in
+                        0) overhead_percent=10 ;;
+                        2) overhead_percent=20 ;;
+                        3) read -rp "$(echo -e ${BLUE}"Enter custom percentage: "${RESET})" overhead_percent ;;
+                        *) overhead_percent=15 ;;
+                    esac
+                    config_lines["${part_name^^}_EXT4_OVERHEAD_PERCENT"]="${overhead_percent:-15}"
+                else
+                    ext4_mode="strict"
+                    config_lines["${part_name^^}_EXT4_MODE"]="$ext4_mode"
+                fi
+                current_index=$((current_index + 1)); break
             fi
         done
     done
@@ -699,37 +706,36 @@ run_super_create_config_interactive() {
         echo "# Generated on $(date)"
         echo "# WARNING: Do NOT edit this file manually unless you know what you are doing."
         echo ""
-        
         echo "# --- Super Partition Metadata ---"
         grep -v -E '^(#|$)' "${metadata_dir}/super_repack_info.txt"
         echo ""
-        
         echo "# --- Logical Partition Repack Settings ---"
         echo "PARTITION_LIST=\"${partition_list[*]}\""
         echo ""
 
-        for part_name in "${partition_list[@]}"; do
-            echo "# Settings for ${part_name}"
-            echo "${part_name^^}_FS=\"${config_lines[${part_name^^}_FS]}\""
-            if [ "${config_lines[${part_name^^}_FS]}" == "erofs" ]; then
-                echo "${part_name^^}_EROFS_COMPRESSION=\"${config_lines[${part_name^^}_EROFS_COMPRESSION]}\""
-                if [ -n "${config_lines[${part_name^^}_EROFS_LEVEL]}" ]; then
-                    echo "${part_name^^}_EROFS_LEVEL=\"${config_lines[${part_name^^}_EROFS_LEVEL]}\""
-                fi
-            else
-                echo "${part_name^^}_EXT4_MODE=\"${config_lines[${part_name^^}_EXT4_MODE]}\""
+    for part_name in "${partition_list[@]}"; do
+        echo "# Settings for ${part_name}"
+        echo "${part_name^^}_FS=\"${config_lines[${part_name^^}_FS]}\""
+        if [ "${config_lines[${part_name^^}_FS]}" == "erofs" ]; then
+            echo "${part_name^^}_EROFS_COMPRESSION=\"${config_lines[${part_name^^}_EROFS_COMPRESSION]}\""
+            if [ -n "${config_lines[${part_name^^}_EROFS_LEVEL]}" ]; then echo "${part_name^^}_EROFS_LEVEL=\"${config_lines[${part_name^^}_EROFS_LEVEL]}\""; fi
+        else
+            echo "${part_name^^}_EXT4_MODE=\"${config_lines[${part_name^^}_EXT4_MODE]}\""
+            if [ "${config_lines[${part_name^^}_EXT4_MODE]}" == "flexible" ]; then
+                echo "${part_name^^}_EXT4_OVERHEAD_PERCENT=\"${config_lines[${part_name^^}_EXT4_OVERHEAD_PERCENT]}\""
             fi
-            echo ""
-        done
+        fi
+        echo ""
+    done
     } > "$final_config_file"
 
     echo -e "\n${GREEN}${BOLD}[✓] Universal repack configuration saved to:${RESET}\n${final_config_file}"
-    
     read -rp $'\nPress Enter to return...'
 }
 
-# --- REVISED: This function now uses the universal project.conf ---
+# --- MODIFIED: run_super_repack_interactive now passes percentage overhead ---
 run_super_repack_interactive() {
+
     local project_dir metadata_dir part_config_file logical_dir extracted_dir
 
     select_item "Select project to repack:" "SUPER_TOOLS" "dir"
@@ -771,26 +777,26 @@ run_super_repack_interactive() {
     local all_successful=true
 
     echo -e "\n${BLUE}--- Repacking content into logical partitions ---${RESET}"
+
     for part_name in $PARTITION_LIST; do
         current=$((current + 1))
-        local spin=0
-        
-        local fs_var="${part_name^^}_FS"
-        local fs="${!fs_var}"
+        local fs_var="${part_name^^}_FS"; local fs="${!fs_var}"
         local repack_args=("--fs" "$fs")
         if [ "$fs" == "erofs" ]; then
             local comp_var="${part_name^^}_EROFS_COMPRESSION"; local level_var="${part_name^^}_EROFS_LEVEL"
             [ -n "${!comp_var}" ] && repack_args+=("--erofs-compression" "${!comp_var}")
             [ -n "${!level_var}" ] && repack_args+=("--erofs-level" "${!level_var}")
         else
-            local mode_var="${part_name^^}_EXT4_MODE"
-            [ -n "${!mode_var}" ] && repack_args+=("--ext4-mode" "${!mode_var}")
+            local mode_var="${part_name^^}_EXT4_MODE"; [ -n "${!mode_var}" ] && repack_args+=("--ext4-mode" "${!mode_var}")
+            if [ "${!mode_var}" == "flexible" ]; then
+                local percent_var="${part_name^^}_EXT4_OVERHEAD_PERCENT"
+                repack_args+=("--ext4-overhead-percent" "${!percent_var}")
+            fi
         fi
         
-        # --- CRITICAL FIX: Re-implemented the spinner logic ---
-        bash "$REPACK_SCRIPT_PATH" "${extracted_dir}/${part_name}" "${logical_dir}/${part_name}.img" "${repack_args[@]}" --no-banner >/dev/null 2>&1 &
+        bash "$REPACK_SCRIPT_PATH" "${project_dir}/extracted_content/${part_name}" "${logical_dir}/${part_name}.img" "${repack_args[@]}" --no-banner >/dev/null 2>&1 &
         local pid=$!
-        
+
         while kill -0 $pid 2>/dev/null; do
             echo -ne "\r\033[K${YELLOW}(${current}/${total}) Repacking: ${BOLD}${part_name}${RESET}... ${spinner[$((spin++ % 10))]}"
             sleep 0.1
@@ -804,6 +810,7 @@ run_super_repack_interactive() {
         else
             echo -e "\r\033[K${GREEN}(${current}/${total}) Repacked:  ${BOLD}${part_name}${RESET} [✓]"
         fi
+
     done
 
     if [ "$all_successful" = false ]; then
@@ -853,7 +860,7 @@ run_advanced_tools_menu() {
     done
 }
 
-# --- REVISED: The main non-interactive function now handles super actions ---
+# --- MODIFIED: run_non_interactive now handles percentage overhead ---
 run_non_interactive() {
     set -e
     local config_file="$1"
@@ -871,7 +878,7 @@ run_non_interactive() {
         if [ -z "$input_image" ] || [ -z "$extract_dir" ]; then echo -e "${RED}Error: INPUT_IMAGE/EXTRACT_DIR not set.${RESET}"; exit 1; fi
         
         echo -e "\n${BOLD}Unpack Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $input_image\n  - ${YELLOW}Output Directory:${RESET} $extract_dir"
-        echo -e "\n${RED}${BOLD}Starting unpack. DO NOT INTERRUPT...${RESET}"; bash "$UNPACK_SCRIPT_PATH" "$input_image" "$extract_dir" --no-banner
+        echo -e "\n${RED}${BOLD}Starting unpack. DO NOT INTERRUPT...${RESET}\n"; bash "$UNPACK_SCRIPT_PATH" "$input_image" "$extract_dir" --no-banner
         echo -e "\n${GREEN}${BOLD}Success: Image unpacked to $extract_dir${RESET}"
 
     elif [ "$ACTION" == "repack" ]; then
@@ -880,15 +887,25 @@ run_non_interactive() {
         if [[ "$output_image" != /* ]]; then output_image="REPACKED_IMAGES/$output_image"; fi
         if [ -z "$source_dir" ] || [ -z "$output_image" ] || [ -z "$fs" ]; then echo -e "${RED}Error: SOURCE_DIR/OUTPUT_IMAGE/FILESYSTEM not set.${RESET}"; exit 1; fi
         
-        local repack_args=("--fs" "$fs"); local create_sparse="${CONFIG[CREATE_SPARSE_IMAGE]:-false}"; local erofs_comp="${CONFIG[COMPRESSION_MODE]:-none}"; local erofs_level="${CONFIG[COMPRESSION_LEVEL]}"; local ext4_mode="${CONFIG[MODE]:-flexible}"
-        if [ "$fs" == "erofs" ]; then repack_args+=("--erofs-compression" "$erofs_comp"); repack_args+=("--erofs-level" "$erofs_level"); elif [ "$fs" == "ext4" ]; then repack_args+=("--ext4-mode" "$ext4_mode"); fi
+        local repack_args=("--fs" "$fs"); local create_sparse="${CONFIG[CREATE_SPARSE_IMAGE]:-true}"; local erofs_comp="${CONFIG[COMPRESSION_MODE]}"; local erofs_level="${CONFIG[COMPRESSION_LEVEL]}"; local ext4_mode="${CONFIG[MODE]}"
         
         echo -e "\n${BOLD}Repack Summary:${RESET}\n  - ${YELLOW}Source Directory:${RESET} $source_dir\n  - ${YELLOW}Output Image:${RESET}     $output_image\n  - ${YELLOW}Filesystem:${RESET}       $fs"
-        if [ "$fs" == "erofs" ]; then echo -e "  - ${YELLOW}EROFS Compression:${RESET}  $erofs_comp"; if [ -n "$erofs_level" ]; then echo -e "  - ${YELLOW}EROFS Level:${RESET}        $erofs_level"; fi; else echo -e "  - ${YELLOW}EXT4 Mode:${RESET}        $ext4_mode"; fi
+        if [ "$fs" == "erofs" ]; then
+            [ -n "$erofs_comp" ] && repack_args+=("--erofs-compression" "$erofs_comp"); [ -n "$erofs_level" ] && repack_args+=("--erofs-level" "$erofs_level")
+            echo -e "  - ${YELLOW}EROFS Compression:${RESET}  ${erofs_comp:-none}"
+        else
+            [ -n "$ext4_mode" ] && repack_args+=("--ext4-mode" "$ext4_mode")
+            echo -e "  - ${YELLOW}EXT4 Mode:${RESET}        ${ext4_mode:-strict}"
+            if [ "$ext4_mode" == "flexible" ]; then
+                local overhead_percent="${CONFIG[EXT4_OVERHEAD_PERCENT]:-5}"
+                repack_args+=("--ext4-overhead-percent" "$overhead_percent")
+                echo -e "  - ${YELLOW}EXT4 Overhead:${RESET}      ${overhead_percent}%"
+            fi
+        fi
         echo -e "  - ${YELLOW}Create Sparse IMG:${RESET}  $create_sparse"
         
         echo -e "\n${RED}${BOLD}Starting repack. DO NOT INTERRUPT...${RESET}"; bash "$REPACK_SCRIPT_PATH" "$source_dir" "$output_image" "${repack_args[@]}" --no-banner
-        
+
         local final_image_path="$output_image"
         if [ -f "$output_image" ]; then
             if [ "$create_sparse" == "true" ]; then
@@ -912,8 +929,8 @@ run_non_interactive() {
 
         echo -e "\n${BOLD}Super Unpack Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $input_image\n  - ${YELLOW}Project Name:${RESET} $project_name"
         echo -e "\n${RED}${BOLD}Starting super unpack...${RESET}"
-        
-        # Mirror the interactive logic
+
+        # Mirror the interactive logic        
         mkdir -p "$project_dir/.metadata" "$project_dir/logical_partitions" "$project_dir/extracted_content"
         bash "$SUPER_SCRIPT_PATH" unpack "$input_image" "$project_dir/logical_partitions" --no-banner &>/dev/null
         
@@ -926,23 +943,19 @@ run_non_interactive() {
         rm -rf "$project_dir/logical_partitions"
         echo -e "\n${GREEN}${BOLD}Success: Super image unpacked to $project_dir${RESET}"
 
-    # --- NEW: Non-interactive super repack ---
+    # --- Non-interactive super repack ---
     elif [ "$ACTION" == "super_repack" ]; then
-        local project_name="${CONFIG[PROJECT_NAME]}"
-        local output_image="${CONFIG[OUTPUT_IMAGE]}"
+        local project_name="${CONFIG[PROJECT_NAME]}"; local output_image="${CONFIG[OUTPUT_IMAGE]}"
         if [[ "$output_image" != /* ]]; then output_image="REPACKED_IMAGES/$output_image"; fi
         if [ -z "$project_name" ] || [ -z "$output_image" ]; then echo -e "${RED}Error: PROJECT_NAME/OUTPUT_IMAGE not set.${RESET}"; exit 1; fi
-
-        local project_dir="SUPER_TOOLS/$project_name"
-        local final_config_file="${project_dir}/project.conf"
+        local project_dir="SUPER_TOOLS/$project_name"; local final_config_file="${project_dir}/project.conf"
         if [ ! -f "$final_config_file" ]; then echo -e "${RED}Error: 'project.conf' not found in '$project_dir'.${RESET}"; exit 1; fi
         
         source "$final_config_file"
         echo -e "\n${BOLD}Super Repack Summary:${RESET}\n  - ${YELLOW}Project:${RESET} $project_name\n  - ${YELLOW}Output Image:${RESET} $output_image"
         echo -e "\n${RED}${BOLD}Starting super repack...${RESET}"
         
-        local logical_dir="${project_dir}/logical_partitions"
-        mkdir -p "$logical_dir"
+        local logical_dir="${project_dir}/logical_partitions"; mkdir -p "$logical_dir"
         
         for part_name in $PARTITION_LIST; do
             echo "--- Repacking logical partition: ${part_name} ---"
@@ -950,17 +963,19 @@ run_non_interactive() {
             local repack_args=("--fs" "$fs")
             if [ "$fs" == "erofs" ]; then
                 local comp_var="${part_name^^}_EROFS_COMPRESSION"; local level_var="${part_name^^}_EROFS_LEVEL"
-                [ -n "${!comp_var}" ] && repack_args+=("--erofs-compression" "${!comp_var}")
-                [ -n "${!level_var}" ] && repack_args+=("--erofs-level" "${!level_var}")
+                [ -n "${!comp_var}" ] && repack_args+=("--erofs-compression" "${!comp_var}"); [ -n "${!level_var}" ] && repack_args+=("--erofs-level" "${!level_var}")
             else
                 local mode_var="${part_name^^}_EXT4_MODE"; [ -n "${!mode_var}" ] && repack_args+=("--ext4-mode" "${!mode_var}")
+                if [ "${!mode_var}" == "flexible" ]; then
+                    local percent_var="${part_name^^}_EXT4_OVERHEAD_PERCENT"
+                    repack_args+=("--ext4-overhead-percent" "${!percent_var}")
+                fi
             fi
             bash "$REPACK_SCRIPT_PATH" "$project_dir/extracted_content/${part_name}" "$logical_dir/${part_name}.img" "${repack_args[@]}" --no-banner &>/dev/null
         done
 
         echo "--- Assembling final super image ---"
-        local sparse_flag=""
-        [ "${CONFIG[CREATE_SPARSE_IMAGE]}" == "false" ] && sparse_flag="--raw"
+        local sparse_flag=""; [ "${CONFIG[CREATE_SPARSE_IMAGE]}" == "false" ] && sparse_flag="--raw"
         bash "$SUPER_SCRIPT_PATH" repack "$logical_dir" "$output_image" "$sparse_flag" --no-banner &>/dev/null
         rm -rf "$logical_dir"
         

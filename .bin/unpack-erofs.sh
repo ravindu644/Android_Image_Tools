@@ -366,9 +366,6 @@ echo "FILESYSTEM_TYPE=$SOURCE_FS_TYPE" >> "${REPACK_INFO}/metadata.txt"
 
 # Proactively save EXT4 metadata for super image workflow
 if [ "$SOURCE_FS_TYPE" == "ext4" ]; then
-    if [ "$INTERACTIVE_MODE" = true ] || [ "$NO_BANNER" != true ]; then
-      echo -e "${BLUE}Source is EXT4, saving original filesystem parameters...${RESET}"
-    fi
     
     mounted_image=$(findmnt -n -o SOURCE --target "$MOUNT_DIR")
     
