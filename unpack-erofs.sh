@@ -341,7 +341,7 @@ fi
 # Unmount the image
 if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
   umount "$MOUNT_DIR"
-  echo -e "\n${GREEN}Image unmounted successfully.${RESET}"
+  echo -e "${GREEN}Image unmounted successfully.${RESET}"
 fi
 
 echo -e "\n${GREEN}${BOLD}Done!${RESET}"
