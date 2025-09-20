@@ -458,9 +458,10 @@ case $FS_CHOICE in
         CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
         
         # --- START OF ENHANCED AUTOSIZING LOGIC ---
-        if [ "$EXT4_MODE" == "flexible" ] && { [ "$FILESYSTEM_TYPE" != "ext4" ] || [ "$CURRENT_CONTENT_SIZE" -gt "$ORIGINAL_CAPACITY" ]; }; then
-            echo -e "\n${YELLOW}${BOLD}Flexible mode: Auto-calculating exact required image size...${RESET}"
-            
+
+        if [ "$EXT4_MODE" == "flexible" ]; then
+            echo -e "\n${YELLOW}${BOLD}Flexible mode: Auto-calculating exact required image size...${RESET}\n"
+
             # 1. Dry Run: Create an oversized sparse file to determine minimum size.
             DRY_RUN_IMG="${TEMP_ROOT}/dry_run.img"
             DRY_RUN_MOUNT="${TEMP_ROOT}/dry_run_mount"
