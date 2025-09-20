@@ -515,115 +515,68 @@ case $FS_CHOICE in
             esac
         fi
 
-        # Prioritize pre-saved metadata for super image workflow ---
-        # First, source the metadata file. This loads all saved variables.
         source "${REPACK_INFO}/metadata.txt"
 
-        # Check if the critical variables were loaded from the metadata file.
-        if [ -z "$ORIGINAL_BLOCK_COUNT" ] || [ -z "$ORIGINAL_INODE_COUNT" ]; then
-            # Fallback for old unpacks: try to read the original image file directly.
-            echo -e "${YELLOW}Pre-saved EXT4 params not found, reading from original source image...${RESET}"
+        if [ -z "$ORIGINAL_BLOCK_COUNT" ]; then
             if [ -f "$SOURCE_IMAGE" ]; then
                 ORIGINAL_BLOCK_COUNT=$(get_fs_param "$SOURCE_IMAGE" "Block count")
-                ORIGINAL_INODE_COUNT=$(get_fs_param "$SOURCE_IMAGE" "Inode count")
-                
-                # Also need to get these for flexible mode fallback
-                ORIGINAL_UUID=$(get_fs_param "$SOURCE_IMAGE" "Filesystem UUID")
-                ORIGINAL_VOLUME_NAME=$(get_fs_param "$SOURCE_IMAGE" "Filesystem volume name")
-                ORIGINAL_INODE_SIZE=$(get_fs_param "$SOURCE_IMAGE" "Inode size")
-                ORIGINAL_FEATURES=$(tune2fs -l "$SOURCE_IMAGE" | grep "Filesystem features:" | awk -F':' '{print $2}' | xargs | sed 's/ /,/g')
             else
-                echo -e "${RED}Error: Could not find pre-saved EXT4 params or the original source image at '$SOURCE_IMAGE'.${RESET}"
-                echo -e "${YELLOW}Cannot use 'Strict' mode. Please try 'Flexible' or re-unpack the image with the latest script.${RESET}"
-                exit 1
+                EXT4_MODE="flexible"
+                FILESYSTEM_TYPE="unknown"
             fi
         fi
 
-        # This check can only happen after we have loaded the original parameters
         if [ "$FILESYSTEM_TYPE" == "ext4" ]; then
             ORIGINAL_CAPACITY=$((ORIGINAL_BLOCK_COUNT * 4096))
-            CURRENT_INODE_COUNT=$(find "$EXTRACT_DIR" -path "${EXTRACT_DIR}/.repack_info" -prune -o -print | wc -l)
-            CURRENT_INODE_COUNT=$((CURRENT_INODE_COUNT - 1))
-            CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
         fi
-
-        if [ "$EXT4_MODE" == "strict" ]; then
-            echo -e "\n${YELLOW}${BOLD}Strict mode selected. Verifying source filesystem and content...${RESET}\n"
-
-            if [ "$FILESYSTEM_TYPE" != "ext4" ]; then
-                echo -e "\n${RED}${BOLD}Error: Strict mode is only available when the source image is also ext4.${RESET}"
-                echo -e "${RED}The source for this project was '${FILESYSTEM_TYPE}'. Please choose Flexible mode.${RESET}"
-                exit 1
-            fi
+        CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
+        
+        # --- START OF NEW AUTOSIZING LOGIC ---
+        if [ "$EXT4_MODE" == "flexible" ] && { [ "$FILESYSTEM_TYPE" != "ext4" ] || [ "$CURRENT_CONTENT_SIZE" -gt "$ORIGINAL_CAPACITY" ]; }; then
+            echo -e "\n${YELLOW}${BOLD}Flexible mode: Auto-calculating exact required image size...${RESET}"
             
-            # Use a small safety buffer for inodes.
-            INODE_CHECK_COUNT=$((CURRENT_INODE_COUNT + 5))
-
-            if [ "$CURRENT_CONTENT_SIZE" -gt "$ORIGINAL_CAPACITY" ] || [ "$INODE_CHECK_COUNT" -gt "$ORIGINAL_INODE_COUNT" ]; then
-                echo -e "\n${RED}${BOLD}Error: Content has grown beyond the original image's limits.${RESET}"
-                if [ "$CURRENT_CONTENT_SIZE" -gt "$ORIGINAL_CAPACITY" ]; then
-                    original_hr=$(numfmt --to=iec-i --suffix=B "$ORIGINAL_CAPACITY")
-                    current_hr=$(numfmt --to=iec-i --suffix=B "$CURRENT_CONTENT_SIZE")
-                    echo -e "${RED}- New content size ($current_hr) is too large for the original partition ($original_hr).${RESET}"
-                fi
-                if [ "$INODE_CHECK_COUNT" -gt "$ORIGINAL_INODE_COUNT" ]; then
-                    echo -e "${RED}- The number of files/folders ($CURRENT_INODE_COUNT) exceeds the original partition's capacity ($ORIGINAL_INODE_COUNT).${RESET}"
-                fi
-                echo -e "${YELLOW}Strict mode cannot be used. Please choose Flexible mode to create a larger image.${RESET}"
-                exit 1
-            fi
+            # 1. Dry Run: Create an oversized sparse file to determine minimum size.
+            DRY_RUN_IMG="${TEMP_ROOT}/dry_run.img"
+            DRY_RUN_MOUNT="${TEMP_ROOT}/dry_run_mount"
+            mkdir -p "$DRY_RUN_MOUNT"
+            OVERSIZED_BYTES=$((CURRENT_CONTENT_SIZE + 500*1024*1024))
+            truncate -s "$OVERSIZED_BYTES" "$DRY_RUN_IMG"
+            mkfs.ext4 -q -m 0 "$DRY_RUN_IMG"
+            mount -o loop,rw "$DRY_RUN_IMG" "$DRY_RUN_MOUNT"
+            (cd "$EXTRACT_DIR" && tar --selinux --exclude=.repack_info -cf - .) | (cd "$DRY_RUN_MOUNT" && tar --selinux -xf -) >/dev/null 2>&1
+            sync && umount "$DRY_RUN_MOUNT"
             
-            echo -e "${GREEN}Content fits. Creating new image with original filesystem parameters...${RESET}"
+            # 2. Shrink to find the absolute minimum required size.
+            e2fsck -fy "$DRY_RUN_IMG" >/dev/null 2>&1
+            resize2fs -M "$DRY_RUN_IMG" >/dev/null 2>&1
+            min_block_count=$(dumpe2fs -h "$DRY_RUN_IMG" 2>/dev/null | grep 'Block count:' | awk '{print $3}')
+            rm -rf "$DRY_RUN_IMG" "$DRY_RUN_MOUNT"
+            
+            # 3. Calculate the final size with a standard 10% overhead for free space.
+            final_block_count=$(echo "($min_block_count * 1.10) / 1" | bc)
+            
+            echo -e "${BLUE}Minimum blocks required: ${min_block_count}${RESET}"
+            echo -e "${BLUE}Final blocks with overhead: ${final_block_count}${RESET}"
+            
+            # 4. Create the final image with the calculated size.
+            dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$final_block_count" status=none
+            if [ "$FILESYSTEM_TYPE" == "ext4" ]; then
+                 mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$OUTPUT_IMG"
+            else
+                 mkfs.ext4 -q "$OUTPUT_IMG"
+            fi
+            mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+
+        else # Strict mode or Flexible mode where content fits
+            echo -e "\n${GREEN}${BOLD}Content fits original size. Cloning filesystem structure...${RESET}"
             dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$ORIGINAL_BLOCK_COUNT" status=none
             mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$OUTPUT_IMG"
             mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
-        
-        else # Flexible Mode
-            echo -e "\n${YELLOW}${BOLD}Flexible mode selected. Analyzing source...${RESET}\n"
-
-            if [ "$FILESYSTEM_TYPE" == "ext4" ]; then
-                # Use a more generous buffer for flexible mode.
-                INODE_CHECK_COUNT=$((CURRENT_INODE_COUNT + 100))
-
-                if [ "$CURRENT_CONTENT_SIZE" -le "$ORIGINAL_CAPACITY" ] && [ "$INODE_CHECK_COUNT" -le "$ORIGINAL_INODE_COUNT" ]; then
-                    echo -e "${GREEN}Content fits. Creating new image with original parameters for efficiency.${RESET}"
-                    dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$ORIGINAL_BLOCK_COUNT" status=none
-                    mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$OUTPUT_IMG"
-                    mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
-                else
-                    REASON=""
-                    if [ "$CURRENT_CONTENT_SIZE" -gt "$ORIGINAL_CAPACITY" ]; then REASON="content is larger"; fi
-                    if [ "$INODE_CHECK_COUNT" -gt "$ORIGINAL_INODE_COUNT" ]; then
-                        if [ -n "$REASON" ]; then REASON="$REASON and "; fi
-                        REASON="${REASON}it has more files"
-                    fi
-
-                    echo -e "${YELLOW}Creating larger image because the ${REASON}. Using original as blueprint...${RESET}"
-                    
-                    # Calculate new size with a 25% overhead plus a 32MB safety margin
-                    SIZE_WITH_OVERHEAD=$(echo "($CURRENT_CONTENT_SIZE * 1.25) + (32 * 1024 * 1024)" | bc)
-                    BLOCK_COUNT=$(echo "($SIZE_WITH_OVERHEAD + 4095) / 4096" | bc)
-                    
-                    echo -e "${BLUE}New Block count: $BLOCK_COUNT${RESET}"
-                    dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$BLOCK_COUNT" status=none
-                    mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$OUTPUT_IMG"
-                    mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
-                fi
-            else # Fallback: Source is not ext4
-                echo -e "${BLUE}Source is not ext4. Creating a new generic ext4 image...${RESET}"
-                CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
-                SIZE_WITH_OVERHEAD=$(echo "($CURRENT_CONTENT_SIZE * 1.25) + (32 * 1024 * 1024)" | bc)
-                BLOCK_COUNT=$(echo "($SIZE_WITH_OVERHEAD + 4095) / 4096" | bc)
-                
-                echo -e "${BLUE}Calculated Block count: $BLOCK_COUNT${RESET}"
-                dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$BLOCK_COUNT" status=none
-                mkfs.ext4 -q "$OUTPUT_IMG"
-                mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
-            fi
         fi
+        # --- END OF NEW AUTOSIZING LOGIC ---
 
         # --- Common part for all EXT4 paths: Refill and Finalize ---
-        echo -e "\n${BLUE}Copying files to image...${RESET}"
+        echo -e "\n${BLUE}Copying files to final image...${RESET}"
         (cd "$EXTRACT_DIR" && tar --selinux --exclude=.repack_info -cf - .) | (cd "$MOUNT_POINT" && tar --selinux -xf -) &
         show_copy_progress "$EXTRACT_DIR" "$MOUNT_POINT"
         wait $!
@@ -635,7 +588,7 @@ case $FS_CHOICE in
         echo -e "${BLUE}Unmounting image...${RESET}"
         sync && umount "$MOUNT_POINT"
         
-        e2fsck -yf "$OUTPUT_IMG" >/dev/null 2>/dev/null
+        e2fsck -yf "$OUTPUT_IMG" >/dev/null 2>&1
         [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"
 
         echo -e "\n${GREEN}${BOLD}Successfully created EXT4 image: $OUTPUT_IMG${RESET}"

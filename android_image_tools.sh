@@ -191,7 +191,9 @@ display_final_image_size() {
     fi
     
     local file_size
-    file_size=$(du -h "$image_path" | awk '{print $1}')
+    # Use stat to get the true logical size, and numfmt for correct IEC units (MiB).
+    # This is now consistent with the repack script.
+    file_size=$(stat -c %s "$image_path" | numfmt --to=iec-i --suffix=B --padding=7)
     echo -e "\n${GREEN}${BOLD}Final Image Size: ${file_size}${RESET}"
 }
 
