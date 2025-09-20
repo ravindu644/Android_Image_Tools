@@ -262,35 +262,37 @@ run_repack() {
     echo -e "\n${GREEN}${BOLD}Repack successful!${RESET}"
 }
 
-
-# --- START OF NEW, ROBUST MAIN EXECUTION LOGIC ---
+# --- MAIN EXECUTION LOGIC ---
 
 # Initialize variables for arguments and flags
 ACTION=""
-ARGS=()
+POSITIONAL_ARGS=()
 INTERACTIVE_MODE=true
 
-# Parse arguments and flags
+# This loop correctly separates global flags from positional arguments,
+# regardless of their order.
 while (( "$#" )); do
   case "$1" in
     --no-banner)
       INTERACTIVE_MODE=false
-      shift
+      shift # Consume the flag
       ;;
     -*)
-      echo -e "${RED}Error: Unknown option $1${RESET}" >&2
+      echo -e "${RED}Error: Unknown global option $1${RESET}" >&2
       print_usage
       ;;
     *)
-      if [ -z "$ACTION" ]; then
-        ACTION="$1"
-      else
-        ARGS+=("$1")
-      fi
-      shift
+      # Not a flag, so it must be a positional argument.
+      POSITIONAL_ARGS+=("$1")
+      shift # Consume the argument
       ;;
   esac
 done
+
+# Now, POSITIONAL_ARGS contains only the action and its own arguments
+ACTION=${POSITIONAL_ARGS[0]:-}
+# Use array slicing to get the true arguments for the action
+ACTION_ARGS=("${POSITIONAL_ARGS[@]:1}")
 
 # Validate action
 if [ "$ACTION" != "unpack" ] && [ "$ACTION" != "repack" ]; then
@@ -300,12 +302,12 @@ if [ "$ACTION" != "unpack" ] && [ "$ACTION" != "repack" ]; then
 fi
 
 # Validate argument counts for each action
-if [ "$ACTION" == "unpack" ] && [ "${#ARGS[@]}" -ne 2 ]; then
+if [ "$ACTION" == "unpack" ] && [ "${#ACTION_ARGS[@]}" -ne 2 ]; then
     if [ "$INTERACTIVE_MODE" = true ]; then print_banner; fi
     echo -e "${RED}Error: 'unpack' requires exactly 2 arguments: <super_image> and <output_directory>.${RESET}"
     print_usage
 fi
-if [ "$ACTION" == "repack" ] && { [ "${#ARGS[@]}" -ne 2 ] && [ "${#ARGS[@]}" -ne 3 ]; }; then
+if [ "$ACTION" == "repack" ] && { [ "${#ACTION_ARGS[@]}" -ne 2 ] && [ "${#ACTION_ARGS[@]}" -ne 3 ]; }; then
     if [ "$INTERACTIVE_MODE" = true ]; then print_banner; fi
     echo -e "${RED}Error: 'repack' requires 2 arguments with an optional '--raw' flag.${RESET}"
     print_usage
@@ -319,10 +321,10 @@ check_dependencies
 
 case "$ACTION" in
     unpack)
-        run_unpack "${ARGS[0]}" "${ARGS[1]}"
+        run_unpack "${ACTION_ARGS[@]}"
         ;;
     repack)
-        run_repack "${ARGS[0]}" "${ARGS[1]}" "${ARGS[2]}"
+        run_repack "${ACTION_ARGS[@]}"
         ;;
 esac
 
