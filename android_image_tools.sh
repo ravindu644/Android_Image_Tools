@@ -517,60 +517,98 @@ run_repack_interactive() {
 }
 
 # --- START OF NEW SUPER KITCHEN FUNCTIONS ---
-
 run_super_unpack_interactive() {
-    local super_image session_name project_dir metadata_dir tmp_dir
+    local super_image session_name project_dir metadata_dir logical_dir extracted_dir
 
-    # Step 1: Select super image
     select_item "Select super image to unpack:" "INPUT_IMAGES" "image_file"
     if [ $? -ne 0 ]; then return; fi
     super_image="$AIT_SELECTED_ITEM"
 
-    # Step 2: Get session name
     clear; print_banner; echo
-    read -rp "$(echo -e ${BLUE}"Enter a name for this project session (no spaces): "${RESET})" session_name
+    read -rp "$(echo -e ${BLUE}"Enter a project name (no spaces): "${RESET})" session_name
     if [ -z "$session_name" ]; then
-        echo -e "\n${RED}Error: Session name cannot be empty.${RESET}"; sleep 2; return
+        echo -e "\n${RED}Error: Project name cannot be empty.${RESET}"; sleep 2; return
     fi
 
     project_dir="SUPER_TOOLS/$session_name"
     metadata_dir="$project_dir/.metadata"
+    logical_dir="$project_dir/logical_partitions"
+    extracted_dir="$project_dir/extracted_content"
 
     if [ -d "$project_dir" ]; then
         echo -e "\n${RED}Error: A project named '$session_name' already exists.${RESET}"; sleep 2; return
     fi
 
-    mkdir -p "$project_dir" "$metadata_dir"
+    mkdir -p "$project_dir" "$metadata_dir" "$logical_dir" "$extracted_dir"
     
-    echo -e "\n${RED}${BOLD}Starting full super unpack. This may take a while. DO NOT INTERRUPT...${RESET}"
+    echo -e "\n${RED}${BOLD}Starting full super unpack. DO NOT INTERRUPT...${RESET}"
     trap '' INT
     set -e
 
-    tmp_dir=$(mktemp -d -t ait_super_unpack_XXXXXX)
+    # Step 1: Run the initial part of super-tools to get metadata and convert to raw.
+    # This is quick and the output is useful, so we show it directly.
+    bash "$SUPER_SCRIPT_PATH" unpack "$super_image" "$logical_dir" --no-banner
     
-    # Run super unpack to get logical partitions into temp dir
-    bash "$SUPER_SCRIPT_PATH" unpack "$super_image" "$tmp_dir" --no-banner
-    
-    # Move the super repack info to its final destination
-    mv "${tmp_dir}/repack_info.txt" "${metadata_dir}/super_repack_info.txt"
-
-    # Find and unpack each logical partition
+    set +e # Disable exit on error for the loop
     local partition_list_file="${metadata_dir}/partition_list.txt"
     touch "$partition_list_file"
     
-    find "$tmp_dir" -maxdepth 1 -type f -name '*.img' ! -name 'super.raw.img' | while read -r logical_img; do
-        local part_name
-        part_name=$(basename "$logical_img" .img)
-        echo -e "\n${BLUE}--- Unpacking logical partition: ${BOLD}$part_name${RESET} ---"
-        bash "$UNPACK_SCRIPT_PATH" "$logical_img" "${project_dir}/${part_name}" --no-banner
-        echo "$part_name" >> "$partition_list_file"
+    local partitions_to_unpack=()
+    while IFS= read -r item; do
+        partitions_to_unpack+=("$item")
+    done < <(find "$logical_dir" -maxdepth 1 -type f -name '*.img' ! -name 'super.raw.img' -exec basename {} .img \;)
+    
+    local total=${#partitions_to_unpack[@]}
+    local current=0
+    local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
+    local all_successful=true
+
+    echo -e "\n${BLUE}--- Extracting content from logical partitions ---${RESET}"
+    for part_name in "${partitions_to_unpack[@]}"; do
+        current=$((current + 1))
+        local spin=0
+        
+        # Run the unpack in the background so we can show a spinner
+        # We redirect output to /dev/null because we only care about success or failure.
+        bash "$UNPACK_SCRIPT_PATH" "${logical_dir}/${part_name}.img" "${extracted_dir}/${part_name}" --no-banner >/dev/null 2>&1 &
+        local pid=$!
+
+        while kill -0 $pid 2>/dev/null; do
+            echo -ne "\r\033[K${YELLOW}(${current}/${total}) Extracting: ${BOLD}${part_name}${RESET}... ${spinner[$((spin++ % 10))]}"
+            sleep 0.1
+        done
+
+        wait $pid
+        if [ $? -ne 0 ]; then
+            echo -e "\r\033[K${RED}(${current}/${total}) FAILED to extract: ${BOLD}${part_name}${RESET} [✗]"
+            all_successful=false
+            break
+        else
+            echo -e "\r\033[K${GREEN}(${current}/${total}) Extracted: ${BOLD}${part_name}${RESET} [✓]"
+            echo "$part_name" >> "$partition_list_file"
+        fi
     done
     
-    rm -rf "$tmp_dir"
-    set +e
-    trap 'cleanup_and_exit' INT TERM EXIT
+    if [ "$all_successful" = false ]; then
+        trap 'cleanup_and_exit' INT TERM EXIT
+        read -rp $'\nPress Enter to return...'
+        return
+    fi
+    
+    local logical_size
+    logical_size=$(du -sh "$logical_dir" | awk '{print $1}')
+    echo -e "\n${BLUE}The intermediate logical partitions (${logical_size}) can be removed to save space.${RESET}"
+    select_option "Delete intermediate logical partitions?" "Yes (Recommended)" "No (Keep for reference)" --no-clear
 
-    echo -e "\n${GREEN}${BOLD}Super unpack successful! Project created at: $project_dir${RESET}"
+    if [ "$AIT_CHOICE_INDEX" -eq 0 ]; then
+        rm -rf "$logical_dir"
+        echo -e "\n${GREEN}[✓] Intermediate files removed.${RESET}"
+    fi
+
+    trap 'cleanup_and_exit' INT TERM EXIT
+    echo -e "\n${GREEN}${BOLD}Super unpack successful!${RESET}"
+    echo -e "  - Project created at: ${BOLD}${project_dir}${RESET}"
+    echo -e "  - Extracted Partitions: ${BOLD}${total}${RESET} (${partitions_to_unpack[*]})"
     read -rp $'\nPress Enter to return...'
 }
 
@@ -630,13 +668,15 @@ run_super_create_config_interactive() {
 }
 
 run_super_repack_interactive() {
-    local project_dir metadata_dir part_config_file tmp_dir
+    local project_dir metadata_dir part_config_file logical_dir extracted_dir
 
     select_item "Select project to repack:" "SUPER_TOOLS" "dir"
     if [ $? -ne 0 ]; then return; fi
-
     project_dir="$AIT_SELECTED_ITEM"
+    
     metadata_dir="${project_dir}/.metadata"
+    logical_dir="${project_dir}/logical_partitions"
+    extracted_dir="${project_dir}/extracted_content"
     part_config_file="${metadata_dir}/partitions_repack.conf"
 
     if [ ! -f "$part_config_file" ]; then
@@ -656,18 +696,25 @@ run_super_repack_interactive() {
     local sparse_flag=""
     [ "$AIT_CHOICE_INDEX" -eq 1 ] && sparse_flag="--raw"
 
-    echo -e "\n${RED}${BOLD}Starting full super repack. This will take a long time. DO NOT INTERRUPT...${RESET}"
+    echo -e "\n${RED}${BOLD}Starting full super repack. DO NOT INTERRUPT...${RESET}"
     trap '' INT
     set -e
     
-    tmp_dir=$(mktemp -d -t ait_super_repack_XXXXXX)
+    mkdir -p "$logical_dir"
+    
+    set +e # Disable exit on error for the loop
+    local total=$(echo "$PARTITION_LIST" | wc -w)
+    local current=0
+    local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
+    local all_successful=true
 
+    echo -e "\n${BLUE}--- Repacking content into logical partitions ---${RESET}"
     for part_name in $PARTITION_LIST; do
-        echo -e "\n${BLUE}--- Repacking logical partition: ${BOLD}$part_name${RESET} ---"
+        current=$((current + 1))
+        local spin=0
         
         local fs_var="${part_name^^}_FS"
         local fs="${!fs_var}"
-        
         local repack_args=("--fs" "$fs")
         if [ "$fs" == "erofs" ]; then
             local comp_var="${part_name^^}_EROFS_COMPRESSION"
@@ -679,18 +726,40 @@ run_super_repack_interactive() {
             [ -n "${!mode_var}" ] && repack_args+=("--ext4-mode" "${!mode_var}")
         fi
         
-        bash "$REPACK_SCRIPT_PATH" "${project_dir}/${part_name}" "${tmp_dir}/${part_name}.img" "${repack_args[@]}" --no-banner
+        bash "$REPACK_SCRIPT_PATH" "${extracted_dir}/${part_name}" "${logical_dir}/${part_name}.img" "${repack_args[@]}" --no-banner >/dev/null 2>&1 &
+        local pid=$!
+        
+        while kill -0 $pid 2>/dev/null; do
+            echo -ne "\r\033[K${YELLOW}(${current}/${total}) Repacking: ${BOLD}${part_name}${RESET}... ${spinner[$((spin++ % 10))]}"
+            sleep 0.1
+        done
+
+        wait $pid
+        if [ $? -ne 0 ]; then
+            echo -e "\r\033[K${RED}(${current}/${total}) FAILED to repack: ${BOLD}${part_name}${RESET} [✗]"
+            all_successful=false
+            break
+        else
+            echo -e "\r\033[K${GREEN}(${current}/${total}) Repacked:  ${BOLD}${part_name}${RESET} [✓]"
+        fi
     done
+
+    if [ "$all_successful" = false ]; then
+        trap 'cleanup_and_exit' INT TERM EXIT
+        read -rp $'\nPress Enter to return...'
+        return
+    fi
     
-    echo -e "\n${BLUE}--- Repacking final super image ---${RESET}"
-    cp "${metadata_dir}/super_repack_info.txt" "${tmp_dir}/repack_info.txt"
-    bash "$SUPER_SCRIPT_PATH" repack "$tmp_dir" "$output_image" "$sparse_flag" --no-banner
+    echo -e "\n${BLUE}--- Assembling final super image ---${RESET}"
+    # Show the final lpmake output as it is informative
+    bash "$SUPER_SCRIPT_PATH" repack "$logical_dir" "$output_image" "$sparse_flag" --no-banner
     
-    rm -rf "$tmp_dir"
-    set +e
+    rm -rf "$logical_dir"
     trap 'cleanup_and_exit' INT TERM EXIT
     
-    echo -e "\n${GREEN}${BOLD}Super repack successful! Final image is at: $output_image${RESET}"
+    echo -e "\n${GREEN}${BOLD}Super repack successful!${RESET}"
+    echo -e "  - Final image: ${BOLD}$output_image${RESET}"
+    echo -e "  - Repacked Partitions: ${BOLD}${total}${RESET} (${PARTITION_LIST})"
     display_final_image_size "$output_image"
     read -rp $'\nPress Enter to return...'
 }

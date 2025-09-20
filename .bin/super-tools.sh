@@ -109,6 +109,7 @@ parse_lpdump_and_save_config() {
     echo -e "${GREEN}[✓] Repack configuration saved.${RESET}"
 }
 
+# --- Unpack Logic ---
 run_unpack() {
     local super_image="$1"
     local output_dir="$2"
@@ -120,9 +121,9 @@ run_unpack() {
     fi
     
     TMP_DIR=$(mktemp -d -t super_unpack_XXXXXX)
-    mkdir -p "$output_dir"
     
     local raw_super_image="${TMP_DIR}/super.raw.img"
+    local config_file="${TMP_DIR}/repack_info.txt"
 
     echo -e "\n${BLUE}${BOLD}Starting unpack process for${RESET} ${BOLD}${super_image}...${RESET}"
     
@@ -137,13 +138,34 @@ run_unpack() {
     echo -e "\n${BLUE}Dumping partition layout...${RESET}"
     lpdump "$raw_super_image" > "${TMP_DIR}/lpdump.txt"
 
-    parse_lpdump_and_save_config "${TMP_DIR}/lpdump.txt" "${output_dir}/repack_info.txt"
+    parse_lpdump_and_save_config "${TMP_DIR}/lpdump.txt" "$config_file"
 
     echo -e "\n${BLUE}Unpacking logical partitions...${RESET}"
-    lpunpack --slot=0 "$raw_super_image" "$output_dir"
+    
+    # Run lpunpack in the background and capture its output to prevent screen clutter.
+    lpunpack --slot=0 "$raw_super_image" "$output_dir" >/dev/null 2>&1 &
+    local pid=$!
+    
+    local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
+    local spin=0
 
-    echo -e "\n${GREEN}${BOLD}Unpack successful!${RESET}"
-    echo -e "  - Logical partitions and config stored in: ${BOLD}${output_dir}/${RESET}"
+    # DON'T TOUCH \r\033[K
+    while kill -0 $pid 2>/dev/null; do
+        echo -ne "\r\033[K${YELLOW}Extracting all logical partitions... ${spinner[$((spin++ % 10))]}"
+        sleep 0.1
+    done
+
+    wait $pid
+    if [ $? -ne 0 ]; then
+        echo -e "\r\033[K${RED}FAILED to unpack logical partitions [✗]"
+        echo -e "${RED}The super image may be corrupt or an lpunpack error occurred.${RESET}"
+        exit 1
+    else
+        echo -e "\r\033[K${GREEN}Successfully extracted all logical partitions [✓]"
+    fi
+
+    # Move the config file alongside the logical partitions' destination
+    mv "$config_file" "${output_dir}/../.metadata/super_repack_info.txt"
 }
 
 # --- Repack Logic ---
@@ -159,13 +181,14 @@ run_repack() {
     fi
 
     session_dir=${session_dir%/}
-    local config_file="${session_dir}/repack_info.txt"
+    # Config is now expected in the parent's .metadata directory
+    local config_file="${session_dir}/../.metadata/super_repack_info.txt"
 
     if [ ! -d "$session_dir" ] || [ ! -f "$config_file" ]; then
-        echo -e "${RED}Error: Invalid session directory or missing 'repack_info.txt'.${RESET}"; exit 1
+        echo -e "${RED}Error: Invalid session directory or missing metadata.${RESET}"; exit 1
     fi
     
-    echo -e "\n${BLUE}Starting repack process using session: ${BOLD}${session_dir}...${RESET}"
+    echo -e "\n${BLUE}Starting repack process using partitions from: ${BOLD}${session_dir}${RESET}"
     source "$config_file"
 
     local cmd="lpmake"
@@ -185,9 +208,7 @@ run_repack() {
         local group_partitions_var="LP_GROUP_${group}_PARTITIONS"
         local partitions="${!group_partitions_var}"
         
-        if [ -z "$partitions" ]; then
-            continue
-        fi
+        if [ -z "$partitions" ]; then continue; fi
 
         local total_group_size=0
         declare -A current_partition_sizes
@@ -195,7 +216,7 @@ run_repack() {
         for part in $partitions; do
             local part_img="${session_dir}/${part}.img"
             if [ ! -f "$part_img" ]; then
-                echo -e "${RED}Error: Repacked image '${part_img}' for partition '${part}' not found!${RESET}"
+                echo -e "${RED}Error: Repacked image '${part_img}' not found!${RESET}"
                 exit 1
             fi
             local size
@@ -223,11 +244,6 @@ run_repack() {
     eval "$cmd"
     
     echo -e "\n${GREEN}${BOLD}Repack successful!${RESET}"
-    if [ "$create_sparse" = true ]; then
-        echo -e "  - New sparse super image created at: ${BOLD}${output_image}${RESET}"
-    else
-        echo -e "  - New raw super image created at: ${BOLD}${output_image}${RESET}"
-    fi
 }
 
 
