@@ -51,7 +51,7 @@ if [ ! -f "$IMAGE_FILE" ]; then
   exit 1
 fi
 
-# Add show_progress function before cleanup()
+# This function provides a clean, single-line progress indicator for the copy process.
 show_progress() {
     local pid=$1
     local target=$2
@@ -61,17 +61,24 @@ show_progress() {
 
     while kill -0 $pid 2>/dev/null; do
         current_size=$(du -sb "$target" | cut -f1)
-        percentage=$((current_size * 100 / total))
+        
+        # Prevent division by zero if the source is empty
+        if [ "$total" -gt 0 ]; then
+            percentage=$((current_size * 100 / total))
+        else
+            percentage=100
+        fi
+        
         current_hr=$(numfmt --to=iec-i --suffix=B "$current_size")
         total_hr=$(numfmt --to=iec-i --suffix=B "$total")
         
-        # Clear entire line before printing
+        # Clear the entire line before printing the new status
         echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Copying: ${percentage}% (${current_hr}/${total_hr})${RESET}"
         sleep 0.1
     done
     
-    # Clear line and show completion
-    echo -e "\r\033[K${GREEN}[✓] Copy completed${RESET}\n"
+    # Clear the progress line and print the final success message
+    echo -e "\r\033[K${GREEN}[✓] Files copied successfully with SELinux contexts${RESET}\n"
 }
 
 # Function to clean up mount point and temporary files
@@ -274,28 +281,16 @@ echo -e "${BLUE}└─ Target: ${EXTRACT_DIR}${RESET}\n"
 # Calculate total size for progress
 total_size=$(du -sb "$MOUNT_DIR" | cut -f1)
 
-# Use tar with selinux flag for proper context preservation
-if command -v pv >/dev/null 2>&1; then
-    (cd "$MOUNT_DIR" && tar --selinux -cf - .) | \
-    pv -s "$total_size" -N "Copying" | \
-    (cd "$EXTRACT_DIR" && tar --selinux -xf -)
-    echo -e "\n${GREEN}[✓] Files copied successfully with SELinux contexts${RESET}"
-else
-    # Use custom progress display
-    (cd "$MOUNT_DIR" && tar --selinux -cf - .) | \
-    (cd "$EXTRACT_DIR" && tar --selinux -xf -) & 
-    show_progress $! "$EXTRACT_DIR" "$total_size"
-    wait $!
-    # No need for another success message as show_progress already prints one
-fi
+# Use a custom progress display for a cleaner output.
+# The tar pipeline is run in the background while we monitor its progress.
+(cd "$MOUNT_DIR" && tar --selinux -cf - .) | (cd "$EXTRACT_DIR" && tar --selinux -xf -) &
+copy_pid=$!
 
-# Verify copy succeeded
-if [ $? -eq 0 ]; then
-    echo -e "${GREEN}[✓] Files copied successfully with SELinux contexts${RESET}"
-else
-    echo -e "\n${RED}[!] Error occurred during copy${RESET}"
-    exit 1
-fi
+# Show progress and wait for the copy to finish.
+# The 'wait' command will propagate any error code from the tar pipeline,
+# and 'set -e' will cause the script to exit on failure.
+show_progress $copy_pid "$EXTRACT_DIR" "$total_size"
+wait $copy_pid
 
 # Store timestamp, filesystem type and metadata location for repacking
 echo "UNPACK_TIME=$(date +%s)" > "${REPACK_INFO}/metadata.txt"
