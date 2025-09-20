@@ -433,13 +433,9 @@ case $FS_CHOICE in
         echo -e "\n${BLUE}${BOLD}Select EXT4 Repack Mode:${RESET}"
         echo -e "1. Strict (clone original image structure exactly - for repair)"
         echo -e "2. Flexible (auto-resize if content is larger - for customization)"
-        read -p "Enter your choice [1-2]: " REPACK_MODE
-
-        if [ "$REPACK_MODE" == "1" ]; then
-            EXT4_MODE="strict"
-        else
-            EXT4_MODE="flexible"
-        fi
+        read -p "Enter your choice [1-2]: " repack_mode
+        
+        [ "$repack_mode" == "1" ] && EXT4_MODE="strict" || EXT4_MODE="flexible"
         
         source "${REPACK_INFO}/metadata.txt"
 
@@ -452,13 +448,9 @@ case $FS_CHOICE in
             fi
         fi
 
-        if [ "$FILESYSTEM_TYPE" == "ext4" ]; then
-            ORIGINAL_CAPACITY=$((ORIGINAL_BLOCK_COUNT * 4096))
-        fi
         CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
         
         # --- START OF ENHANCED AUTOSIZING LOGIC ---
-
         if [ "$EXT4_MODE" == "flexible" ]; then
             echo -e "\n${YELLOW}${BOLD}Flexible mode: Auto-calculating exact required image size...${RESET}\n"
 
@@ -487,20 +479,20 @@ case $FS_CHOICE in
             
             # 4. Create the final image with the calculated size.
             dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$final_block_count" status=none
-            if [ "$FILESYSTEM_TYPE" == "ext4" ]; then
+            if [ "$FILESYSTEM_TYPE" == "ext4" ] && [ -n "$ORIGINAL_UUID" ]; then
                  mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$OUTPUT_IMG"
             else
                  mkfs.ext4 -q "$OUTPUT_IMG"
             fi
             mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
 
-        else # Strict mode or Flexible mode where content fits
-            if [ "$EXT4_MODE" == "strict" ] && [ "$FILESYSTEM_TYPE" != "ext4" ]; then
+        else # Strict mode
+            if [ "$FILESYSTEM_TYPE" != "ext4" ]; then
                 echo -e "\n${RED}${BOLD}Error: Strict mode is only available when the source image is also ext4.${RESET}"
                 echo -e "${RED}The source for this project was '${FILESYSTEM_TYPE}'. Please choose Flexible mode.${RESET}"
                 exit 1
             fi
-            echo -e "\n${GREEN}${BOLD}Content fits original size. Cloning filesystem structure...${RESET}"
+            echo -e "\n${GREEN}${BOLD}Strict mode: Cloning original filesystem structure...${RESET}"
             dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$ORIGINAL_BLOCK_COUNT" status=none
             mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$OUTPUT_IMG"
             mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
