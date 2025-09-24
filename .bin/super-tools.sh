@@ -231,7 +231,7 @@ run_repack() {
         cmd+=" --group ${group}:${total_group_size}"
         
         for part in $partitions; do
-            cmd+=" --partition ${part}:readonly:${current_partition_sizes[$part]}:${group}"
+            cmd+=" --partition ${part}:none:${current_partition_sizes[$part]}:${group}"
             cmd+=" --image ${part}=${session_dir}/${part}.img"
         done
     done
