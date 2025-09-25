@@ -511,7 +511,7 @@ run_repack_interactive() {
                     if [ "$create_sparse" = true ]; then
                         local sparse_output="${output_image%.img}.sparse.img"; echo -e "\n${BLUE}Converting to sparse image...${RESET}"; set -e; img2simg "$output_image" "$sparse_output"; set +e; rm -f "$output_image"; final_image_path="$sparse_output"
                     fi
-                    echo -e "\n${GREEN}${BOLD}Repack successful. Final image created at: ${final_image_path}${RESET}"
+                    echo -e "${GREEN}${BOLD}Repack successful. Final image created at: ${final_image_path}${RESET}"
                     display_final_image_size "$final_image_path"
                 else echo -e "\n${RED}${BOLD}Repack failed.${RESET}"; fi
                 read -rp $'\nPress Enter to return...'; break;;

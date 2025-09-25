@@ -607,15 +607,18 @@ case $FS_CHOICE in
         fi
         
         # Source metadata first to get variables
-        source "${REPACK_INFO}/metadata.txt"
+        source <(sed 's/=<none>/=""/g' "${REPACK_INFO}/metadata.txt")
 
-        if [ -z "$ORIGINAL_BLOCK_COUNT" ]; then
+        # Fallback logic to ensure critical variables are set if metadata is old
+        if [ -z "$ORIGINAL_BLOCK_COUNT" ] || [ -z "$ORIGINAL_BLOCK_SIZE" ]; then
             if [ -f "$SOURCE_IMAGE" ]; then
+                echo -e "${YELLOW}Warning: Incomplete metadata. Reading info from source image.${RESET}"
                 ORIGINAL_BLOCK_COUNT=$(get_fs_param "$SOURCE_IMAGE" "Block count")
+                ORIGINAL_BLOCK_SIZE=$(get_fs_param "$SOURCE_IMAGE" "Block size")
             else
                 if [ "$EXT4_MODE" == "strict" ]; then
-                    echo -e "${YELLOW}Warning: Original image not found. Forcing Flexible mode.${RESET}"
-                    EXT4_MODE="flexible"
+                    echo -e "${RED}Error: Cannot use strict mode. Source image not found and metadata is incomplete.${RESET}"
+                    exit 1
                 fi
                 FILESYSTEM_TYPE="unknown"
             fi
@@ -644,21 +647,40 @@ case $FS_CHOICE in
                 esac
             fi
             
-            # Use the new intelligent approach
             create_ext4_flexible "$EXTRACT_DIR" "$OUTPUT_IMG" "$MOUNT_POINT" "$EXT4_OVERHEAD_PERCENT"
-            if [ $? -ne 0 ]; then
-                echo -e "${RED}Failed to create flexible ext4 image${RESET}"
-                exit 1
-            fi
 
         else # Strict mode
             if [ "$FILESYSTEM_TYPE" != "ext4" ]; then
                 echo -e "\n${RED}${BOLD}Error: Strict mode is only available when the source image is also ext4.${RESET}"; exit 1
             fi
             echo -e "\n${GREEN}${BOLD}Strict mode: Cloning original filesystem structure...${RESET}"
-            dd if=/dev/zero of="$OUTPUT_IMG" bs=4096 count="$ORIGINAL_BLOCK_COUNT" status=none
-            mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$OUTPUT_IMG"
-            mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+
+            if [ "$ORIGINAL_HAS_SHARED_BLOCKS" == "true" ]; then
+                echo -e "\n${YELLOW}${BOLD}Special 'shared_blocks' feature detected. Creating optimized mountable image.${RESET}\n"
+                
+                target_blocks=$(calculate_optimal_ext4_size "$EXTRACT_DIR" 5)
+
+                features_no_shared_blocks=$(echo "$ORIGINAL_FEATURES" | sed 's/shared_blocks//g' | sed 's/,,/,/g')
+                if [[ "$features_no_shared_blocks" != *has_journal* ]]; then
+                    features_no_shared_blocks+=",^has_journal"
+                fi
+                
+                echo -e "${BLUE}  - Creating temporary well-sized image...${RESET}"
+                dd if=/dev/zero of="$OUTPUT_IMG" bs="4096" count=$target_blocks status=none
+                # THE DEFINITIVE FIX: Restore the -N parameter to specify the original inode count.
+                mkfs.ext4 -q -b "4096" -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$features_no_shared_blocks" "$OUTPUT_IMG"
+                mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+
+            else
+                # Original strict mode logic for images without shared_blocks.
+                features="$ORIGINAL_FEATURES"
+                if [[ "$features" != *has_journal* ]]; then
+                    features+=",^has_journal"
+                fi
+                dd if=/dev/zero of="$OUTPUT_IMG" bs="$ORIGINAL_BLOCK_SIZE" count="$ORIGINAL_BLOCK_COUNT" status=none
+                mkfs.ext4 -q -b "$ORIGINAL_BLOCK_SIZE" -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$features" "$OUTPUT_IMG"
+                mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+            fi
         fi
         
         echo -e "\n${BLUE}Copying files to final image...${RESET}"
@@ -673,7 +695,14 @@ case $FS_CHOICE in
         echo -e "${BLUE}Unmounting image...${RESET}"
         sync && umount "$MOUNT_POINT"
         
-        e2fsck -yf "$OUTPUT_IMG" >/dev/null 2>/dev/null
+        if [ "$EXT4_MODE" == "strict" ] && [ "$ORIGINAL_HAS_SHARED_BLOCKS" == "true" ]; then
+            echo -e "${BLUE}  - Finalizing optimized image...${RESET}"
+            e2fsck -fy "$OUTPUT_IMG" >/dev/null 2>&1
+            echo -e "${BLUE}  - Resizing filesystem to minimum possible size...${RESET}"
+            resize2fs -M "$OUTPUT_IMG" >/dev/null 2>&1
+        fi
+        
+        e2fsck -yf "$OUTPUT_IMG" >/dev/null 2>&1
         [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"
 
         echo -e "\n${GREEN}${BOLD}Successfully created EXT4 image: $OUTPUT_IMG${RESET}"

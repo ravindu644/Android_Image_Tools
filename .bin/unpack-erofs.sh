@@ -173,7 +173,12 @@ handle_shared_blocks() {
     local image_file="$1"
     # Silently check if the feature exists. This is the main condition.
     if tune2fs -l "$image_file" 2>/dev/null | grep -q "shared_blocks"; then
-        echo -e "\n${YELLOW}${BOLD}Warning: Incompatible 'shared_blocks' feature detected.${RESET}\n"
+
+        # Record that this feature existed before we remove it.
+        # We'll create a temporary marker file that the metadata section can check later.
+        touch "${REPACK_INFO}/.has_shared_blocks"
+
+        echo -e "${YELLOW}${BOLD}Warning: Incompatible 'shared_blocks' feature detected.${RESET}\n"
         
         # Use the correct e2fsck command to unshare the blocks. Suppress verbose output.
         if e2fsck -E unshare_blocks -fy "$image_file" >/dev/null 2>&1; then
@@ -210,6 +215,8 @@ if [ -d "$EXTRACT_DIR" ]; then
 fi
 mkdir -p "$EXTRACT_DIR"
 mkdir -p "$REPACK_INFO"
+
+
 
 # Handle special cases like journal recovery and 'shared_blocks' before attempting to mount
 handle_journal_recovery "$IMAGE_FILE"
@@ -366,10 +373,17 @@ echo "FILESYSTEM_TYPE=$SOURCE_FS_TYPE" >> "${REPACK_INFO}/metadata.txt"
 
 # Proactively save EXT4 metadata for super image workflow
 if [ "$SOURCE_FS_TYPE" == "ext4" ]; then
+
+    # Check for the marker file we created in handle_shared_blocks().
+    if [ -f "${REPACK_INFO}/.has_shared_blocks" ]; then
+        echo "ORIGINAL_HAS_SHARED_BLOCKS=true" >> "${REPACK_INFO}/metadata.txt"
+        rm -f "${REPACK_INFO}/.has_shared_blocks" # Clean up the marker
+    fi  
     
     mounted_image=$(findmnt -n -o SOURCE --target "$MOUNT_DIR")
     
     echo "ORIGINAL_BLOCK_COUNT=$(get_fs_param "$mounted_image" "Block count")" >> "${REPACK_INFO}/metadata.txt"
+    echo "ORIGINAL_BLOCK_SIZE=$(get_fs_param "$mounted_image" "Block size")" >> "${REPACK_INFO}/metadata.txt"    
     echo "ORIGINAL_INODE_COUNT=$(get_fs_param "$mounted_image" "Inode count")" >> "${REPACK_INFO}/metadata.txt"
     echo "ORIGINAL_UUID=$(get_fs_param "$mounted_image" "Filesystem UUID")" >> "${REPACK_INFO}/metadata.txt"
     echo "ORIGINAL_VOLUME_NAME=$(get_fs_param "$mounted_image" "Filesystem volume name")" >> "${REPACK_INFO}/metadata.txt"
