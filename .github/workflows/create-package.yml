@@ -1,0 +1,50 @@
+name: Package and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release Version (e.g., v3.1)'
+        required: true
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Prepare Package
+        run: |
+          # Set the zip file name as an environment variable for reuse
+          echo "ZIP_NAME=Android_Image_Tools_${{ github.event.inputs.version }}.zip" >> $GITHUB_ENV
+          
+          # Clean the repository for packaging
+          rm -rf .git
+          find . -name ".gitkeep" -delete
+          
+          # Create a version file
+          echo "${{ github.event.inputs.version }}: https://github.com/${{ github.repository }}/releases/tag/${{ github.event.inputs.version }}" > VERSION.TXT
+
+      - name: Create Zip Archive
+        run: |
+          zip -r -9 "${{ env.ZIP_NAME }}" .
+
+      - name: Upload Artifact for Release
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package
+          path: ${{ env.ZIP_NAME }}
+
+      - name: Create GitHub Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "${{ env.ZIP_NAME }}"
+          token: ${{ secrets.TOKEN }}
+          tag: ${{ github.event.inputs.version }}
+          name: "Android Image Tools ${{ github.event.inputs.version }}"
+          body: |
+            Automated release for version ${{ github.event.inputs.version }}.
+
+            Only supported on Ubuntu/Debian based systems.
+
