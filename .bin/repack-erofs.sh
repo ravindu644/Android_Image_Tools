@@ -658,7 +658,7 @@ case $FS_CHOICE in
             if [ "$ORIGINAL_HAS_SHARED_BLOCKS" == "true" ]; then
                 echo -e "\n${YELLOW}${BOLD}Special 'shared_blocks' feature detected. Creating optimized mountable image.${RESET}\n"
                 
-                target_blocks=$(calculate_optimal_ext4_size "$EXTRACT_DIR" 5)
+                target_blocks=$(calculate_optimal_ext4_size "$EXTRACT_DIR" 10)
 
                 # Prepare the base feature string for mkfs
                 features_for_mkfs=$(echo "$ORIGINAL_FEATURES" | sed 's/shared_blocks//g' | sed 's/,,/,/g')
