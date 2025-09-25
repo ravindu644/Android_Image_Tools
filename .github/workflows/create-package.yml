@@ -20,7 +20,7 @@ jobs:
           echo "ZIP_NAME=Android_Image_Tools_${{ github.event.inputs.version }}.zip" >> $GITHUB_ENV
           
           # Clean the repository for packaging
-          rm -rf .git
+          rm -rf .git*
           find . -name ".gitkeep" -delete
           
           # Create a version file
