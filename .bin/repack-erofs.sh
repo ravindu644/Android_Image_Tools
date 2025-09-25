@@ -660,15 +660,25 @@ case $FS_CHOICE in
                 
                 target_blocks=$(calculate_optimal_ext4_size "$EXTRACT_DIR" 5)
 
-                features_no_shared_blocks=$(echo "$ORIGINAL_FEATURES" | sed 's/shared_blocks//g' | sed 's/,,/,/g')
-                if [[ "$features_no_shared_blocks" != *has_journal* ]]; then
-                    features_no_shared_blocks+=",^has_journal"
+                # Prepare the base feature string for mkfs
+                features_for_mkfs=$(echo "$ORIGINAL_FEATURES" | sed 's/shared_blocks//g' | sed 's/,,/,/g')
+                if [[ "$features_for_mkfs" != *has_journal* ]]; then
+                    features_for_mkfs+=",^has_journal"
                 fi
+
+                # Define default features that mkfs.ext4 might add automatically
+                DEFAULT_FEATURES_TO_CHECK=("resize_inode" "64bit" "flex_bg" "metadata_csum")
                 
+                # For each default feature, check if it was in the original. If not, explicitly disable it.
+                for feature in "${DEFAULT_FEATURES_TO_CHECK[@]}"; do
+                    if [[ "$ORIGINAL_FEATURES" != *"$feature"* ]]; then
+                        features_for_mkfs+=",^$feature"
+                    fi
+                done
+
                 echo -e "${BLUE}  - Creating temporary well-sized image...${RESET}"
                 dd if=/dev/zero of="$OUTPUT_IMG" bs="4096" count=$target_blocks status=none
-                # THE DEFINITIVE FIX: Restore the -N parameter to specify the original inode count.
-                mkfs.ext4 -q -b "4096" -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$features_no_shared_blocks" "$OUTPUT_IMG"
+                mkfs.ext4 -q -b "4096" -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$features_for_mkfs" "$OUTPUT_IMG"
                 mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
 
             else
