@@ -508,7 +508,7 @@ fi
 # Load metadata to check mount method
 MOUNT_METHOD=""
 if [ -f "${REPACK_INFO}/metadata.txt" ]; then
-    source <(grep = "${REPACK_INFO}/metadata.txt")
+    source <(sed 's/=<none>/=""/g' "${REPACK_INFO}/metadata.txt")
 fi
 
 # Add filesystem selection before any operations
@@ -629,7 +629,7 @@ case $FS_CHOICE in
         fi
         
         # Source metadata first to get variables
-        source <(sed 's/=<none>/=""/g' "${REPACK_INFO}/metadata.txt")
+        source <(sed 's/=<none>/=""/g; s/=</="</g; s/>$/"/g' "${REPACK_INFO}/metadata.txt")
 
         # Fallback logic to ensure critical variables are set if metadata is old
         if [ -z "$ORIGINAL_BLOCK_COUNT" ] || [ -z "$ORIGINAL_BLOCK_SIZE" ]; then
