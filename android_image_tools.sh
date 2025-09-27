@@ -472,8 +472,24 @@ run_repack_interactive() {
                 read -rp "$(echo -e ${BLUE}"Step 2: Enter output image path [${BOLD}${default_output_image}${BLUE}]: "${RESET})" output_image
                 output_image=${output_image:-$default_output_image}; step=3;;
             3)
-                local fs_options=("EROFS" "EXT4" "Back"); select_option "Step 3: Select filesystem:" "${fs_options[@]}";
-                case $AIT_CHOICE_INDEX in 0) fs="erofs"; step=4;; 1) fs="ext4"; step=4;; 2) step=1; continue;; esac;;
+                local mount_method=""
+                if [ -f "${source_dir}/.repack_info/metadata.txt" ]; then
+                    source <(grep = "${source_dir}/.repack_info/metadata.txt")
+                    mount_method="${MOUNT_METHOD}"
+                fi
+
+                if [ "$mount_method" == "fuse" ]; then
+                    clear; print_banner
+                    echo -e "\n${RED}${BOLD}WARNING: FUSE-based unpacking detected for this source directory.${RESET}"
+                    echo -e "${RED}${BOLD}Repacking as EXT4 is not supported for images unpacked with FUSE.${RESET}"
+                    echo -e "${RED}${BOLD}Only EROFS repacking is available.${RESET}"
+                    read -rp $'\nPress Enter to continue with EROFS...'
+                    fs="erofs"
+                    step=4
+                else
+                    local fs_options=("EROFS" "EXT4" "Back"); select_option "Step 3: Select filesystem:" "${fs_options[@]}";
+                    case $AIT_CHOICE_INDEX in 0) fs="erofs"; step=4;; 1) fs="ext4"; step=4;; 2) step=1; continue;; esac
+                fi;;
             4)
                 if [ "$fs" == "erofs" ]; then
                     local erofs_options=("none" "lz4" "lz4hc" "deflate" "Back"); select_option "Step 4: Select EROFS compression:" "${erofs_options[@]}"; if [ "$AIT_CHOICE_INDEX" -eq 4 ]; then step=3; continue; fi
@@ -617,7 +633,6 @@ run_super_unpack_interactive() {
     read -rp $'\nPress Enter to return...'
 }
 
-# --- MODIFIED: run_super_create_config_interactive now asks for logging preference ---
 run_super_create_config_interactive() {
 
     local project_dir metadata_dir final_config_file
@@ -642,20 +657,39 @@ run_super_create_config_interactive() {
     while [ "$current_index" -lt "${#partition_list[@]}" ]; do
         local part_name=${partition_list[$current_index]}
         
+        local mount_method=""
+        local part_metadata_file="${project_dir}/extracted_content/${part_name}/.repack_info/metadata.txt"
+        if [ -f "$part_metadata_file" ]; then
+            source <(grep = "$part_metadata_file")
+            mount_method="$MOUNT_METHOD"
+        fi
+
+        local fs
         clear; print_banner
         echo -e "\n${BOLD}Configuring partition ($((current_index + 1))/${#partition_list[@]}): [ ${YELLOW}$part_name${BOLD} ]${RESET}"
-        
-        local menu_options=("EROFS" "EXT4")
-        if [ "$current_index" -gt 0 ]; then menu_options+=("Back to previous partition"); fi
-        select_option "Select filesystem for '${part_name}':" "${menu_options[@]}"
-        
-        if [ "$current_index" -gt 0 ] && [ "$AIT_CHOICE_INDEX" -eq 2 ]; then
-            current_index=$((current_index - 1))
-            continue
+
+        if [ "$mount_method" == "fuse" ]; then
+            echo -e "\n${YELLOW}Note: FUSE-unpack detected for '${part_name}', only EROFS is available.${RESET}"
+            local menu_options=("EROFS (Forced due to FUSE unpack)")
+            if [ "$current_index" -gt 0 ]; then menu_options+=("Back to previous partition"); fi
+            select_option "Select filesystem for '${part_name}':" "${menu_options[@]}"
+
+            if [ "$current_index" -gt 0 ] && [ "$AIT_CHOICE_INDEX" -eq 1 ]; then
+                current_index=$((current_index - 1))
+                continue
+            fi
+            fs="erofs"
+        else
+            local menu_options=("EROFS" "EXT4")
+            if [ "$current_index" -gt 0 ]; then menu_options+=("Back to previous partition"); fi
+            select_option "Select filesystem for '${part_name}':" "${menu_options[@]}"
+
+            if [ "$current_index" -gt 0 ] && [ "$AIT_CHOICE_INDEX" -eq 2 ]; then
+                current_index=$((current_index - 1))
+                continue
+            fi
+            [ "$AIT_CHOICE_INDEX" -eq 0 ] && fs="erofs" || fs="ext4"
         fi
-        
-        local fs
-        [ "$AIT_CHOICE_INDEX" -eq 0 ] && fs="erofs" || fs="ext4"
         config_lines["${part_name^^}_FS"]="$fs"
 
         unset "config_lines[${part_name^^}_EROFS_COMPRESSION]" "config_lines[${part_name^^}_EROFS_LEVEL]" "config_lines[${part_name^^}_EXT4_MODE]" "config_lines[${part_name^^}_EXT4_OVERHEAD_TYPE]" "config_lines[${part_name^^}_EXT4_OVERHEAD_VAL]"
@@ -749,7 +783,6 @@ run_super_create_config_interactive() {
     read -rp $'\nPress Enter to return...'
 }
 
-# --- MODIFIED: run_super_repack_interactive now supports conditional logging ---
 run_super_repack_interactive() {
 
     local project_dir metadata_dir part_config_file logical_dir extracted_dir
@@ -905,7 +938,6 @@ run_advanced_tools_menu() {
     done
 }
 
-# --- MODIFIED: run_non_interactive now handles percentage overhead ---
 run_non_interactive() {
     set -e
     local config_file="$1"
@@ -932,6 +964,17 @@ run_non_interactive() {
         if [[ "$output_image" != /* ]]; then output_image="REPACKED_IMAGES/$output_image"; fi
         if [ -z "$source_dir" ] || [ -z "$output_image" ] || [ -z "$fs" ]; then echo -e "${RED}Error: SOURCE_DIR/OUTPUT_IMAGE/FILESYSTEM not set.${RESET}"; exit 1; fi
         
+        local mount_method=""
+        if [ -f "${source_dir}/.repack_info/metadata.txt" ]; then
+            source <(grep = "${source_dir}/.repack_info/metadata.txt")
+            mount_method="${MOUNT_METHOD}"
+        fi
+        if [ "$mount_method" == "fuse" ] && [ "$fs" == "ext4" ]; then
+            echo -e "\n${RED}${BOLD}ERROR: FUSE-based unpacking detected for '${source_dir}'.${RESET}" >&2
+            echo -e "${RED}${BOLD}Repacking as EXT4 is not supported for images unpacked with FUSE.${RESET}" >&2
+            echo -e "${RED}${BOLD}Please change FILESYSTEM to 'erofs' in your config file.${RESET}" >&2
+            exit 1
+        fi
         local repack_args=("--fs" "$fs"); local create_sparse="${CONFIG[CREATE_SPARSE_IMAGE]:-true}"; local erofs_comp="${CONFIG[COMPRESSION_MODE]}"; local erofs_level="${CONFIG[COMPRESSION_LEVEL]}"; local ext4_mode="${CONFIG[MODE]}"
         
         echo -e "\n${BOLD}Repack Summary:${RESET}\n  - ${YELLOW}Source Directory:${RESET} $source_dir\n  - ${YELLOW}Output Image:${RESET}     $output_image\n  - ${YELLOW}Filesystem:${RESET}       $fs"
@@ -1003,8 +1046,22 @@ run_non_interactive() {
         local logical_dir="${project_dir}/logical_partitions"; mkdir -p "$logical_dir"
         
         for part_name in $PARTITION_LIST; do
-            echo "--- Repacking logical partition: ${part_name} ---"
             local fs_var="${part_name^^}_FS"; local fs="${!fs_var}"
+
+            local mount_method=""
+            local part_metadata_file="$project_dir/extracted_content/${part_name}/.repack_info/metadata.txt"
+            if [ -f "$part_metadata_file" ]; then
+                source <(grep = "$part_metadata_file")
+                mount_method="$MOUNT_METHOD"
+            fi
+            if [ "$mount_method" == "fuse" ] && [ "$fs" == "ext4" ]; then
+                echo -e "\n${RED}${BOLD}ERROR: FUSE-based unpacking detected for partition '${part_name}'.${RESET}" >&2
+                echo -e "${RED}${BOLD}Repacking as EXT4 is not supported for images unpacked with FUSE.${RESET}" >&2
+                echo -e "${RED}${BOLD}Please re-run 'Finalize Project Configuration' or edit 'project.conf'.${RESET}" >&2
+                exit 1
+            fi
+
+            echo "--- Repacking logical partition: ${part_name} ---"
             local repack_args=("--fs" "$fs")
             if [ "$fs" == "erofs" ]; then
                 local comp_var="${part_name^^}_EROFS_COMPRESSION"; local level_var="${part_name^^}_EROFS_LEVEL"

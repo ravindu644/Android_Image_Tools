@@ -505,17 +505,39 @@ if [ "$NO_BANNER" = false ]; then
     echo -e "${BLUE}└─ Target image: ${BOLD}$OUTPUT_IMG${RESET}\n"
 fi
 
+# Load metadata to check mount method
+MOUNT_METHOD=""
+if [ -f "${REPACK_INFO}/metadata.txt" ]; then
+    source <(grep = "${REPACK_INFO}/metadata.txt")
+fi
+
 # Add filesystem selection before any operations
 if [ -z "$FS_CHOICE" ]; then
-    echo -e "\n${BLUE}${BOLD}Select filesystem type:${RESET}"
-    echo -e "1. EROFS"
-    echo -e "2. EXT4"
-    read -p "Enter your choice [1-2]: " choice
-    case $choice in
-        1) FS_CHOICE="erofs" ;;
-        2) FS_CHOICE="ext4" ;;
-        *) FS_CHOICE="erofs" ;;
-    esac
+    if [ "$MOUNT_METHOD" == "fuse" ]; then
+        echo -e "\n${RED}${BOLD}WARNING: FUSE-based unpacking detected.${RESET}"
+        echo -e "${RED}Repacking as EXT4 is not supported for images unpacked with FUSE.${RESET}"
+        echo -e "${RED}Only EROFS repacking is available for this directory.${RESET}"
+        FS_CHOICE="erofs"
+        sleep 2 # Give user time to read
+    else
+        echo -e "\n${BLUE}${BOLD}Select filesystem type:${RESET}"
+        echo -e "1. EROFS"
+        echo -e "2. EXT4"
+        read -p "Enter your choice [1-2]: " choice
+        case $choice in
+            1) FS_CHOICE="erofs" ;;
+            2) FS_CHOICE="ext4" ;;
+            *) FS_CHOICE="erofs" ;;
+        esac
+    fi
+else
+    # Non-interactive check
+    if [ "$MOUNT_METHOD" == "fuse" ] && [ "$FS_CHOICE" == "ext4" ]; then
+        echo -e "\n${RED}${BOLD}ERROR: FUSE-based unpacking detected.${RESET}"
+        echo -e "${RED}Repacking as EXT4 is not supported for images unpacked with FUSE.${RESET}"
+        echo -e "${RED}Please use '--fs erofs' for this directory.${RESET}"
+        exit 1
+    fi
 fi
 
 case $FS_CHOICE in
