@@ -502,13 +502,11 @@ echo ""
 
 # Verify extraction
 if [ $? -eq 0 ]; then
-  if [ "$INTERACTIVE_MODE" = true ]; then
-    echo -e "${GREEN}${BOLD}[✓] Extraction completed successfully${RESET}"
-    echo -e "${BLUE}Files extracted to: ${BOLD}$EXTRACT_DIR${RESET}"
-    echo -e "${BLUE}Repack info stored in: ${BOLD}$REPACK_INFO${RESET}"
-    echo -e "${BLUE}File contexts saved to: ${BOLD}$FILE_CONTEXTS_FILE${RESET}"
-    echo -e "${BLUE}FS config saved to: ${BOLD}$FS_CONFIG_FILE${RESET}"
-  fi
+    echo -e "${GREEN}${BOLD}[✓] Extraction completed successfully${RESET}\n"
+    echo -e "${BOLD}Files extracted to: $EXTRACT_DIR${RESET}"
+    echo -e "${BOLD}Repack info stored in: $REPACK_INFO${RESET}"
+    echo -e "${BOLD}File contexts saved to: $FILE_CONTEXTS_FILE${RESET}"
+    echo -e "${BOLD}FS config saved to: $FS_CONFIG_FILE${RESET}"
 
   # Transfer ownership to actual user
   if [ -n "$SUDO_USER" ]; then
@@ -519,18 +517,12 @@ else
   exit 1
 fi
 
-echo ""
-
 # Unmount the image
-echo -e "${BLUE}Unmounting image...${RESET}"
 if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
   if [ "$MOUNT_METHOD" = "fuse" ]; then
     fusermount -u "$MOUNT_DIR"
   else
     umount "$MOUNT_DIR"
-  fi
-  if [ "$INTERACTIVE_MODE" = true ]; then
-    echo -e "${GREEN}[✓] Image unmounted successfully${RESET}"
   fi
 fi
 
