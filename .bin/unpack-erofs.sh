@@ -21,13 +21,9 @@ print_banner() {
   echo -e "${RESET}"
 }
 
-# --- Start of Custom Tweaks ---
-# Argument parsing to handle calls from the wrapper script and enable a quiet mode.
-
 # Initialize variables
 IMAGE_FILE=""
 OUTPUT_DIR_OVERRIDE=""
-# This flag controls all interactive elements (banner, progress bars)
 INTERACTIVE_MODE=true
 
 # Manual parsing loop
@@ -60,7 +56,6 @@ done
 if [ "$INTERACTIVE_MODE" = true ]; then
     print_banner
 fi
-# --- End of Custom Tweaks ---
 
 # Check if script is run as root
 if [ "$EUID" -ne 0 ]; then
@@ -76,14 +71,11 @@ if [ -z "$IMAGE_FILE" ]; then
 fi
 
 PARTITION_NAME=$(basename "$IMAGE_FILE" .img)
-# --- Start of Custom Tweaks ---
-# Use the override if provided, otherwise use the default
 if [ -n "$OUTPUT_DIR_OVERRIDE" ]; then
   EXTRACT_DIR="$OUTPUT_DIR_OVERRIDE"
 else
   EXTRACT_DIR="extracted_${PARTITION_NAME}"
 fi
-# --- End of Custom Tweaks ---
 MOUNT_DIR="/tmp/${PARTITION_NAME}_mount"
 REPACK_INFO="${EXTRACT_DIR}/.repack_info"
 RAW_IMAGE=""
@@ -115,11 +107,7 @@ show_progress() {
         sleep 0.1
     done
     
-    # --- Start of Custom Tweaks ---
-    # REFINED: Clear the line on completion but DO NOT print a success message here.
-    # The final verification block is the single source of truth for success.
     echo -e "\r\033[K"
-    # --- End of Custom Tweaks ---
 }
 
 # Function to clean up mount point and temporary files
@@ -127,7 +115,7 @@ cleanup() {
   echo -e "\n${YELLOW}Cleaning up...${RESET}"
   if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
     echo -e "Unmounting ${MOUNT_DIR}..."
-    umount "$MOUNT_DIR" 2>/dev/null || true
+    umount "$MOUNT_DIR" 2>/dev/null || fusermount -u "$MOUNT_DIR" 2>/dev/null || true
   fi
   
   # Remove raw image if it was created
@@ -210,62 +198,175 @@ mkdir -p "$MOUNT_DIR"
 
 # Create extraction and repack info directories
 if [ -d "$EXTRACT_DIR" ]; then
-  echo -e "${YELLOW}Removing existing extraction directory: ${EXTRACT_DIR}${RESET}\n"
+  echo -e "${YELLOW}Removing existing extraction directory: ${EXTRACT_DIR}${RESET}"
   rm -rf "$EXTRACT_DIR"
 fi
 mkdir -p "$EXTRACT_DIR"
 mkdir -p "$REPACK_INFO"
 
-
-
 # Handle special cases like journal recovery and 'shared_blocks' before attempting to mount
 handle_journal_recovery "$IMAGE_FILE"
 handle_shared_blocks "$IMAGE_FILE"
 
-# Try to mount the image
-echo -e "Attempting to mount ${BOLD}$IMAGE_FILE${RESET}..."
+# Function to detect if an image is sparse
+is_sparse_image() {
+    local header
+    header=$(hexdump -n 4 -e '4/1 "%02x"' "$1" 2>/dev/null)
+    [ "$header" == "3aff26ed" ]
+}
 
-# First, try a read-write mount to handle journal recovery, then immediately remount as read-only.
-if ! (mount -o loop "$IMAGE_FILE" "$MOUNT_DIR" 2>/dev/null && mount -o remount,ro "$MOUNT_DIR" 2>/dev/null); then
-  echo -e "${YELLOW}Direct mounting failed. Trying to convert image...${RESET}"
-  
-  # Try to determine image format
-  IMAGE_TYPE=$(file "$IMAGE_FILE" | grep -o -E 'Android.*|Linux.*|EROFS.*|data')
-  
-  if [ -n "$IMAGE_TYPE" ]; then
-    echo -e "${BLUE}Detected image type: ${BOLD}$IMAGE_TYPE${RESET}"
+# Function to prepare image for mounting (handle sparse images)
+prepare_image_for_mount() {
+    local input="$1"
     
-    # Create a raw copy to try mounting
-    RAW_IMAGE="${IMAGE_FILE%.img}_raw.img"
-    echo -e "${BLUE}Creating raw image as ${BOLD}$RAW_IMAGE${RESET}${BLUE}...${RESET}"
+    if is_sparse_image "$input"; then
+        echo -e "${YELLOW}Detected sparse image format${RESET}"
+        RAW_IMAGE="${input%.img}_raw.img"
+        echo -e "${BLUE}Converting to raw image as ${BOLD}$RAW_IMAGE${RESET}"
+        if simg2img "$input" "$RAW_IMAGE" 2>/dev/null; then
+            echo -e "${GREEN}Successfully converted sparse image${RESET}"
+            echo "$RAW_IMAGE"
+            return 0
+        else
+            echo -e "${RED}Failed to convert sparse image${RESET}"
+            return 1
+        fi
+    fi
     
-    # Try using simg2img for sparse images
-    if command -v simg2img &> /dev/null; then
-      echo -e "${BLUE}Converting with simg2img...${RESET}"
-      simg2img "$IMAGE_FILE" "$RAW_IMAGE"
+    # Not a sparse image, return original
+    echo "$input"
+    return 0
+}
+
+# Function to detect filesystem type
+detect_filesystem() {
+    local image="$1"
+    local fs_type
+    
+    # Try blkid first (most reliable)
+    fs_type=$(blkid -o value -s TYPE "$image" 2>/dev/null)
+    
+    if [ -n "$fs_type" ]; then
+        echo "$fs_type"
+        return 0
+    fi
+    
+    # Fallback to file command
+    if file "$image" | grep -qi "ext[234]"; then
+        echo "ext4"
+    elif file "$image" | grep -qi "erofs"; then
+        echo "erofs"
+    elif file "$image" | grep -qi "f2fs"; then
+        echo "f2fs"
     else
-      # Simple copy as fallback
-      echo -e "${YELLOW}simg2img not found, creating direct copy...${RESET}"
-      cp "$IMAGE_FILE" "$RAW_IMAGE"
+        echo "unknown"
     fi
+}
+
+# Function to attempt FUSE mounting for supported filesystems
+mount_with_fuse() {
+    local image="$1"
+    local mount_point="$2"
+    local fs_type="$3"
     
-    echo -e "${BLUE}Attempting to mount raw image...${RESET}"
-    if ! (mount -o loop "$RAW_IMAGE" "$MOUNT_DIR" 2>/dev/null && mount -o remount,ro "$MOUNT_DIR" 2>/dev/null); then
-      echo -e "${RED}Failed to mount even after conversion. No luck with this image.${RESET}"
-      exit 1
+    case "$fs_type" in
+        ext4|ext3|ext2)
+            if command -v fuse2fs >/dev/null; then
+                echo -e "${RED}Trying fuse2fs...${RESET}"
+                fuse2fs "$image" "$mount_point" >/dev/null 2>&1
+                return $?
+            else
+                echo -e "${RED}${BOLD}[✗] fuse2fs not found. Install e2fsprogs package.${RESET}"
+                return 1
+            fi
+            ;;
+        erofs)
+            if command -v erofsfuse >/dev/null; then
+                echo -e "${RED}Trying erofsfuse...${RESET}"
+                erofsfuse "$image" "$mount_point" >/dev/null 2>&1
+                return $?
+            else
+                echo -e "${RED}${BOLD}[✗] erofsfuse not found. Rebuild erofs-utils with FUSE support.${RESET}"
+                return 1
+            fi
+            ;;
+        f2fs)
+            echo -e "${RED}${BOLD}[✗] F2FS FUSE mounting not available. F2FS requires kernel support.${RESET}"
+            echo -e "${YELLOW}Install f2fs-tools package for kernel F2FS support.${RESET}"
+            return 1
+            ;;
+        *)
+            echo -e "${RED}${BOLD}[✗] Unsupported filesystem for FUSE mounting: $fs_type${RESET}"
+            return 1
+            ;;
+    esac
+}
+
+# Function to get the actual filesystem type, stripping FUSE prefixes
+get_actual_fs_type() {
+    local mount_point="$1"
+    local detected_type="$2"
+    
+    # Get filesystem type from findmnt
+    local mount_fs_type=$(findmnt -n -o FSTYPE --target "$mount_point" 2>/dev/null)
+    
+    # If it's a FUSE mount, extract the actual filesystem type
+    if [[ "$mount_fs_type" =~ ^fuse\. ]]; then
+        # For FUSE mounts like fuse.fuse2fs, fuse.erofsfuse, return the detected type
+        echo "$detected_type"
+    else
+        # For kernel mounts, return the mount type
+        echo "$mount_fs_type"
     fi
-    
-    echo -e "${GREEN}Successfully mounted raw image.${RESET}"
-  else
-    echo -e "${RED}Failed to identify image type for conversion. No luck with this image.${RESET}"
+}
+
+echo -e "Attempting to mount: ${BOLD}$IMAGE_FILE${RESET}\n"
+
+# First, prepare the image (handle sparse conversion)
+MOUNT_IMAGE=$(prepare_image_for_mount "$IMAGE_FILE")
+if [ $? -ne 0 ]; then
+    echo -e "${RED}${BOLD}Error: Failed to prepare image for mounting${RESET}"
     exit 1
-  fi
-else
-  echo -e "${GREEN}Successfully mounted original image.${RESET}"
 fi
 
+# Detect filesystem type
+FS_TYPE=$(detect_filesystem "$MOUNT_IMAGE")
+echo -e "${BLUE}Detected filesystem: ${BOLD}$FS_TYPE${RESET}"
+
+# Initialize mount success flag
+MOUNT_SUCCESS=false
+MOUNT_METHOD=""
+
+# Try traditional mount first
+echo -e "${BLUE}Trying kernel mount...${RESET}"
+if mount -o loop "$MOUNT_IMAGE" "$MOUNT_DIR" 2>/dev/null; then
+    echo -e "${GREEN}${BOLD}[✓] Successfully mounted using kernel driver${RESET}"
+    MOUNT_SUCCESS=true
+    MOUNT_METHOD="kernel"
+else
+    echo -e "\n${RED}${BOLD}[!] Traditional mount failed${RESET}"
+    echo -e "${RED}Attempting FUSE mount...${RESET}"
+    
+    if mount_with_fuse "$MOUNT_IMAGE" "$MOUNT_DIR" "$FS_TYPE"; then
+        echo -e "\n${GREEN}${BOLD}[✓] Successfully mounted using FUSE${RESET}"
+        MOUNT_SUCCESS=true
+        MOUNT_METHOD="fuse"
+    else
+        echo -e "${RED}${BOLD}[✗] All mount attempts failed. Unable to proceed.${RESET}"
+        exit 1
+    fi
+fi
+
+# Verify mount succeeded
+if [ "$MOUNT_SUCCESS" = false ]; then
+    echo -e "${RED}${BOLD}[✗] Failed to mount the image${RESET}"
+    exit 1
+fi
+
+echo ""
+
 # First get root directory context specifically
-echo -e "\n${BLUE}Capturing root directory attributes...${RESET}"
+echo -e "${BLUE}Capturing root directory attributes...${RESET}"
 ROOT_CONTEXT=$(ls -dZ "$MOUNT_DIR" | awk '{print $1}')
 ROOT_STATS=$(stat -c "%u %g %a" "$MOUNT_DIR")
 
@@ -277,7 +378,7 @@ echo "# File contexts extracted from $IMAGE_FILE on $(date)" > "$FILE_CONTEXTS_F
 echo "/ $ROOT_CONTEXT" >> "$FILE_CONTEXTS_FILE"
 
 # Extract metadata with progress
-echo -e "\n${BLUE}Extracting file attributes...${RESET}"
+echo -e "${BLUE}Extracting file attributes...${RESET}"
 total_items=$(find "$MOUNT_DIR" -mindepth 1 | wc -l)
 processed=0
 spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
@@ -312,7 +413,9 @@ find "$MOUNT_DIR" -mindepth 1 | while read -r item; do
         [ -n "$context" ] && [ "$context" != "?" ] && echo "$rel_path $context" >> "$FILE_CONTEXTS_FILE"
     fi
 done
-echo -e "\r${GREEN}[✓] Attributes extracted successfully${RESET}\n"
+echo -e "\r${GREEN}[✓] Attributes extracted successfully${RESET}"
+
+echo ""
 
 # Calculate checksums with spinner
 echo -e "${BLUE}Calculating original file checksums...${RESET}"
@@ -326,18 +429,18 @@ while kill -0 $! 2>/dev/null; do
 done
 
 # Clear line and show completion
-echo -e "\r\033[K${GREEN}[✓] Checksums generated${RESET}\n"
+echo -e "\r\033[K${GREEN}[✓] Checksums generated${RESET}"
+
+echo ""
 
 # Copy files with SELinux contexts preserved
 echo -e "${BLUE}Copying files with preserved attributes...${RESET}"
 echo -e "${BLUE}┌─ Source: ${MOUNT_DIR}${RESET}"
-echo -e "${BLUE}└─ Target: ${EXTRACT_DIR}${RESET}\n"
+echo -e "${BLUE}└─ Target: ${EXTRACT_DIR}${RESET}"
 
 # Calculate total size for progress
 total_size=$(du -sb "$MOUNT_DIR" | cut -f1)
 
-# --- Start of Custom Tweaks ---
-# REFINED: Logic to select copy method based on INTERACTIVE_MODE.
 if [ "$INTERACTIVE_MODE" = true ] && command -v pv >/dev/null 2>&1; then
     # Interactive mode with pv: Show progress bar.
     (cd "$MOUNT_DIR" && tar --selinux -cf - .) | \
@@ -353,23 +456,26 @@ else
     # Non-interactive (quiet) mode: No progress indicators.
     (cd "$MOUNT_DIR" && tar --selinux -cf - .) | (cd "$EXTRACT_DIR" && tar --selinux -xf -)
 fi
-# --- End of Custom Tweaks ---
 
 # Verify copy succeeded
 if [ $? -eq 0 ]; then
-    # REFINED: This is now the SINGLE source of the success message, preventing duplication.
     echo -e "${GREEN}[✓] Files copied successfully with SELinux contexts${RESET}"
 else
     echo -e "\n${RED}[!] Error occurred during copy${RESET}"
     exit 1
 fi
 
+echo ""
+
 # Store timestamp, filesystem type and metadata location for repacking
+echo -e "${BLUE}Storing extraction metadata...${RESET}"
 echo "UNPACK_TIME=$(date +%s)" > "${REPACK_INFO}/metadata.txt"
 echo "SOURCE_IMAGE=$IMAGE_FILE" >> "${REPACK_INFO}/metadata.txt"
 
-SOURCE_FS_TYPE=$(findmnt -n -o FSTYPE --target "$MOUNT_DIR")
+# Get the actual filesystem type (without FUSE prefix)
+SOURCE_FS_TYPE=$(get_actual_fs_type "$MOUNT_DIR" "$FS_TYPE")
 echo "FILESYSTEM_TYPE=$SOURCE_FS_TYPE" >> "${REPACK_INFO}/metadata.txt"
+echo "MOUNT_METHOD=$MOUNT_METHOD" >> "${REPACK_INFO}/metadata.txt"
 
 # Proactively save EXT4 metadata for super image workflow
 if [ "$SOURCE_FS_TYPE" == "ext4" ]; then
@@ -392,14 +498,16 @@ if [ "$SOURCE_FS_TYPE" == "ext4" ]; then
     echo "ORIGINAL_FEATURES=$FEATURES" >> "${REPACK_INFO}/metadata.txt"
 fi
 
+echo ""
+
 # Verify extraction
 if [ $? -eq 0 ]; then
-  if [ "$INTERACTIVE_MODE" = true ] || [ "$NO_BANNER" != true ]; then
-    echo -e "\n${GREEN}Extraction completed successfully.${RESET}"
-    echo -e "${BOLD}Files extracted to: ${EXTRACT_DIR}${RESET}"
-    echo -e "${BOLD}Repack info stored in: ${REPACK_INFO}${RESET}"
-    echo -e "${BOLD}File contexts saved to: ${FILE_CONTEXTS_FILE}${RESET}"
-    echo -e "${BOLD}FS config saved to: ${FS_CONFIG_FILE}${RESET}\n"
+  if [ "$INTERACTIVE_MODE" = true ]; then
+    echo -e "${GREEN}${BOLD}[✓] Extraction completed successfully${RESET}"
+    echo -e "${BLUE}Files extracted to: ${BOLD}$EXTRACT_DIR${RESET}"
+    echo -e "${BLUE}Repack info stored in: ${BOLD}$REPACK_INFO${RESET}"
+    echo -e "${BLUE}File contexts saved to: ${BOLD}$FILE_CONTEXTS_FILE${RESET}"
+    echo -e "${BLUE}FS config saved to: ${BOLD}$FS_CONFIG_FILE${RESET}"
   fi
 
   # Transfer ownership to actual user
@@ -407,18 +515,25 @@ if [ $? -eq 0 ]; then
     chown -R "$SUDO_USER:$SUDO_USER" "$EXTRACT_DIR"
   fi
 else
-  echo -e "${RED}Error occurred during extraction.${RESET}"
+  echo -e "${RED}${BOLD}[✗] Error occurred during extraction${RESET}"
   exit 1
 fi
 
+echo ""
+
 # Unmount the image
+echo -e "${BLUE}Unmounting image...${RESET}"
 if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
-  umount "$MOUNT_DIR"
-  if [ "$INTERACTIVE_MODE" = true ] || [ "$NO_BANNER" != true ]; then
-    echo -e "\n${GREEN}Image unmounted successfully.${RESET}"
+  if [ "$MOUNT_METHOD" = "fuse" ]; then
+    fusermount -u "$MOUNT_DIR"
+  else
+    umount "$MOUNT_DIR"
+  fi
+  if [ "$INTERACTIVE_MODE" = true ]; then
+    echo -e "${GREEN}[✓] Image unmounted successfully${RESET}"
   fi
 fi
 
-if [ "$INTERACTIVE_MODE" = true ] || [ "$NO_BANNER" != true ]; then
+if [ "$INTERACTIVE_MODE" = true ]; then
     echo -e "\n${GREEN}${BOLD}Done!${RESET}"
 fi

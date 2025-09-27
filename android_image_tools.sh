@@ -64,7 +64,8 @@ check_distro() {
 check_dependencies() {
     local missing_pkgs=()
     local erofs_utils_missing=false
-    local REQUIRED_PACKAGES=("android-sdk-libsparse-utils" "build-essential" "automake" "autoconf" "libtool" "git" "fuse3" "e2fsprogs" "pv" "liblz4-dev" "uuid-dev" "libfuse3-dev")
+    # Added e2fsprogs and fuse to the required packages
+    local REQUIRED_PACKAGES=("android-sdk-libsparse-utils" "build-essential" "automake" "autoconf" "libtool" "git" "fuse3" "e2fsprogs" "pv" "liblz4-dev" "uuid-dev" "libfuse3-dev" "fuse" "e2fsprogs" "f2fs-tools")
     
     for pkg in "${REQUIRED_PACKAGES[@]}"; do
         if ! dpkg -s "$pkg" &> /dev/null; then
@@ -72,7 +73,8 @@ check_dependencies() {
         fi
     done
     
-    if ! command -v mkfs.erofs &>/dev/null; then
+    # Check for erofs-utils with FUSE support
+    if ! command -v mkfs.erofs &>/dev/null || ! command -v erofsfuse &>/dev/null; then
         erofs_utils_missing=true
     fi
     
