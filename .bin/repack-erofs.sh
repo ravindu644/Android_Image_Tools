@@ -349,7 +349,7 @@ prepare_working_directory() {
     
     # Copy with SELinux contexts and progress
     echo -e "${BLUE}Copying files to work directory...${RESET}"
-    (cd "$EXTRACT_DIR" && tar --selinux -cf - .) | (cd "$WORK_DIR" && tar --selinux -xf -) &
+    (cd "$EXTRACT_DIR" && tar -cf - .) | (cd "$WORK_DIR" && tar -xf -) &
     show_copy_progress "$EXTRACT_DIR" "$WORK_DIR"
     wait $!
     
@@ -716,7 +716,7 @@ case $FS_CHOICE in
         fi
         
         echo -e "\n${BLUE}Copying files to final image...${RESET}"
-        (cd "$EXTRACT_DIR" && tar --selinux --exclude=.repack_info -cf - .) | (cd "$MOUNT_POINT" && tar --selinux -xf -) &
+        (cd "$EXTRACT_DIR" && tar --exclude=.repack_info -cf - .) | (cd "$MOUNT_POINT" && tar -xf -) &
         show_copy_progress "$EXTRACT_DIR" "$MOUNT_POINT"
         wait $!
         

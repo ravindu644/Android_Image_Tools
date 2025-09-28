@@ -443,18 +443,18 @@ total_size=$(du -sb "$MOUNT_DIR" | cut -f1)
 
 if [ "$INTERACTIVE_MODE" = true ] && command -v pv >/dev/null 2>&1; then
     # Interactive mode with pv: Show progress bar.
-    (cd "$MOUNT_DIR" && tar --selinux -cf - .) | \
+    (cd "$MOUNT_DIR" && tar -cf - .) | \
     pv -s "$total_size" -N "Copying" | \
-    (cd "$EXTRACT_DIR" && tar --selinux -xf -)
+    (cd "$EXTRACT_DIR" && tar -xf -)
 elif [ "$INTERACTIVE_MODE" = true ]; then
     # Interactive mode without pv: Use custom spinner.
-    (cd "$MOUNT_DIR" && tar --selinux -cf - .) | \
-    (cd "$EXTRACT_DIR" && tar --selinux -xf -) & 
+    (cd "$MOUNT_DIR" && tar -cf - .) | \
+    (cd "$EXTRACT_DIR" && tar -xf -) & 
     show_progress $! "$EXTRACT_DIR" "$total_size"
     wait $!
 else
     # Non-interactive (quiet) mode: No progress indicators.
-    (cd "$MOUNT_DIR" && tar --selinux -cf - .) | (cd "$EXTRACT_DIR" && tar --selinux -xf -)
+    (cd "$MOUNT_DIR" && tar -cf - .) | (cd "$EXTRACT_DIR" && tar -xf -)
 fi
 
 # Verify copy succeeded
