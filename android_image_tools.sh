@@ -434,7 +434,8 @@ run_unpack_interactive() {
                 local default_output_dir="EXTRACTED_IMAGES/extracted_$(basename "$input_image" .img)"
                 clear; print_banner; echo
                 read -rp "$(echo -e ${BLUE}"Step 2: Enter output directory path [${BOLD}${default_output_dir}${BLUE}]: "${RESET})" output_dir
-                output_dir=${output_dir:-$default_output_dir}
+                output_dir="$(echo "$output_dir" | tr -d "\"'")"
+                output_dir="${output_dir:-$default_output_dir}"
                 step=3
                 ;;
             3)
