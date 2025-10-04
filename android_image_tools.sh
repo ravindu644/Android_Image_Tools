@@ -65,7 +65,7 @@ check_dependencies() {
     local missing_pkgs=()
     local erofs_utils_missing=false
     # Added e2fsprogs and fuse to the required packages
-    local REQUIRED_PACKAGES=("android-sdk-libsparse-utils" "build-essential" "automake" "autoconf" "libtool" "git" "fuse3" "e2fsprogs" "pv" "liblz4-dev" "uuid-dev" "libfuse3-dev" "fuse3" "e2fsprogs" "f2fs-tools")
+    local REQUIRED_PACKAGES=("android-sdk-libsparse-utils" "build-essential" "automake" "autoconf" "libtool" "git" "fuse3" "e2fsprogs" "pv" "liblz4-dev" "uuid-dev" "libfuse3-dev" "fuse3" "e2fsprogs" "f2fs-tools" "fuse2fs")
     
     for pkg in "${REQUIRED_PACKAGES[@]}"; do
         if ! dpkg -s "$pkg" &> /dev/null; then
