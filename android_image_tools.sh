@@ -139,9 +139,9 @@ check_dependencies() {
 create_workspace() {
     local ALL_DIRS=("${WORKSPACE_DIRS[@]}" "CONFIGS")
     for dir in "${ALL_DIRS[@]}"; do
-        mkdir -p "$dir"
+        mkdir -p "$SCRIPT_DIR/$dir"
         if [ -n "$SUDO_USER" ]; then
-            chown -R "$SUDO_USER:${SUDO_GROUP:-$SUDO_USER}" "$dir"
+            chown -R "$SUDO_USER:${SUDO_GROUP:-$SUDO_USER}" "$SCRIPT_DIR/$dir"
         fi
     done
 }
@@ -266,7 +266,7 @@ select_option() {
 
 select_item() {
     local header="$1"
-    local search_path="$2"
+    local search_path="$SCRIPT_DIR/$2"
     local item_type="$3"
     local add_back_option=true
     if [[ "$4" == "--no-back" ]]; then
@@ -320,7 +320,7 @@ select_item() {
 export_repack_config() {
     local source_dir="$1" output_image="$2" fs="$3" repack_mode="$4" erofs_comp="$5" erofs_level="$6" create_sparse="$7" overhead_percent="$8"
     
-    mkdir -p "CONFIGS"
+    mkdir -p "$SCRIPT_DIR/CONFIGS"
     clear; print_banner
     
     local partition_name
@@ -330,7 +330,7 @@ export_repack_config() {
     read -rp "$(echo -e ${BLUE}"Enter filename for preset [${BOLD}${default_conf_name}${BLUE}]: "${RESET})" conf_filename
     conf_filename=${conf_filename:-$default_conf_name}
     
-    local final_conf_path="CONFIGS/$conf_filename"
+    local final_conf_path="$SCRIPT_DIR/CONFIGS/$conf_filename"
     local full_source_path
     full_source_path=$(realpath "$source_dir")
     local full_output_path
@@ -361,14 +361,13 @@ export_repack_config() {
     read -rp $'\nPress Enter to return to the summary...'
 }
 
-# --- START: REPLACE THIS ENTIRE FUNCTION ---
 cleanup_workspace() {
     clear; print_banner
     
     local total_bytes=0
     local dirs_to_scan=("${WORKSPACE_DIRS[@]}" "CONFIGS")
     local workspace_bytes
-    workspace_bytes=$(du -sb "${dirs_to_scan[@]}" 2>/dev/null | awk '{s+=$1} END {print s}')
+    workspace_bytes=$(du -sb "${dirs_to_scan[@]/#/$SCRIPT_DIR/}" 2>/dev/null | awk '{s+=$1} END {print s}')
     total_bytes=$((total_bytes + ${workspace_bytes:-0}))
     
     local temp_files_list
@@ -395,9 +394,9 @@ cleanup_workspace() {
     
     echo -e "\n${BLUE}Cleaning workspace directories...${RESET}"
     for dir in "${dirs_to_scan[@]}"; do
-        if [ -d "$dir" ]; then
-            echo -e "  - Deleting contents of ${BOLD}$dir${RESET}"
-            find "$dir" -mindepth 1 -not -name '.gitkeep' -delete
+        if [ -d "$SCRIPT_DIR/$dir" ]; then
+            echo -e "  - Deleting contents of ${BOLD}$SCRIPT_DIR/$dir${RESET}"
+            find "$SCRIPT_DIR/$dir" -mindepth 1 -not -name '.gitkeep' -delete
         fi
     done
     
@@ -432,7 +431,7 @@ run_unpack_interactive() {
                 step=2
                 ;;
             2)
-                local default_output_dir="EXTRACTED_IMAGES/extracted_$(basename "$input_image" .img)"
+                local default_output_dir="$SCRIPT_DIR/EXTRACTED_IMAGES/extracted_$(basename "$input_image" .img)"
                 clear; print_banner; echo
                 read -rp "$(echo -e ${BLUE}"Step 2: Enter output directory path [${BOLD}${default_output_dir}${BLUE}]: "${RESET})" output_dir
                 output_dir="$(echo "$output_dir" | tr -d "\"'")"
@@ -470,7 +469,7 @@ run_repack_interactive() {
                 select_item "Step 1: Select directory to repack:" "EXTRACTED_IMAGES" "dir"; if [ $? -ne 0 ]; then return; fi
                 source_dir="$AIT_SELECTED_ITEM"; step=2;;
             2)
-                local partition_name=$(basename "$source_dir" | sed 's/^extracted_//'); local default_output_image="REPACKED_IMAGES/${partition_name}_repacked.img"; clear; print_banner; echo
+                local partition_name=$(basename "$source_dir" | sed 's/^extracted_//'); local default_output_image="$SCRIPT_DIR/REPACKED_IMAGES/${partition_name}_repacked.img"; clear; print_banner; echo
                 read -rp "$(echo -e ${BLUE}"Step 2: Enter output image path [${BOLD}${default_output_image}${BLUE}]: "${RESET})" output_image
                 output_image=${output_image:-$default_output_image}; step=3;;
             3)
@@ -553,7 +552,7 @@ run_super_unpack_interactive() {
         echo -e "\n${RED}Error: Project name cannot be empty.${RESET}"; sleep 2; return
     fi
 
-    project_dir="SUPER_TOOLS/$session_name"
+    project_dir="$SCRIPT_DIR/SUPER_TOOLS/$session_name"
     metadata_dir="$project_dir/.metadata"
     logical_dir="$project_dir/logical_partitions"
     extracted_dir="$project_dir/extracted_content"
@@ -807,7 +806,7 @@ run_super_repack_interactive() {
     source "$part_config_file"
     
     clear; print_banner
-    local default_output_image="REPACKED_IMAGES/super_$(basename "$project_dir").img"
+    local default_output_image="$SCRIPT_DIR/REPACKED_IMAGES/super_$(basename "$project_dir").img"
     read -rp "$(echo -e ${BLUE}"Enter path for final super image [${BOLD}${default_output_image}${BLUE}]: "${RESET})" output_image
     output_image=${output_image:-$default_output_image}
     
@@ -948,12 +947,12 @@ run_non_interactive() {
     while IFS='=' read -r key value; do if [[ ! "$key" =~ ^\# && -n "$key" ]]; then CONFIG["$key"]="$value"; fi; done < "$config_file"
     ACTION="${CONFIG[ACTION]}"
     if [ -z "$ACTION" ]; then echo -e "${RED}Error: 'ACTION' not defined.${RESET}"; exit 1; fi
-    trap '' INT
+    trap '' INT TERM EXIT
 
     if [ "$ACTION" == "unpack" ]; then
         local input_image="${CONFIG[INPUT_IMAGE]}"; local extract_dir="${CONFIG[EXTRACT_DIR]}"
-        if [[ "$input_image" != /* ]]; then input_image="INPUT_IMAGES/$input_image"; fi
-        if [[ "$extract_dir" != /* ]]; then extract_dir="EXTRACTED_IMAGES/$extract_dir"; fi
+        if [[ "$input_image" != /* ]]; then input_image="$SCRIPT_DIR/INPUT_IMAGES/$input_image"; fi
+        if [[ "$extract_dir" != /* ]]; then extract_dir="$SCRIPT_DIR/EXTRACTED_IMAGES/$extract_dir"; fi
         if [ -z "$input_image" ] || [ -z "$extract_dir" ]; then echo -e "${RED}Error: INPUT_IMAGE/EXTRACT_DIR not set.${RESET}"; exit 1; fi
         
         echo -e "\n${BOLD}Unpack Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $input_image\n  - ${YELLOW}Output Directory:${RESET} $extract_dir"
@@ -962,8 +961,8 @@ run_non_interactive() {
 
     elif [ "$ACTION" == "repack" ]; then
         local source_dir="${CONFIG[SOURCE_DIR]}"; local output_image="${CONFIG[OUTPUT_IMAGE]}"; local fs="${CONFIG[FILESYSTEM]}"
-        if [[ "$source_dir" != /* ]]; then source_dir="EXTRACTED_IMAGES/$source_dir"; fi
-        if [[ "$output_image" != /* ]]; then output_image="REPACKED_IMAGES/$output_image"; fi
+        if [[ "$source_dir" != /* ]]; then source_dir="$SCRIPT_DIR/EXTRACTED_IMAGES/$source_dir"; fi
+        if [[ "$output_image" != /* ]]; then output_image="$SCRIPT_DIR/REPACKED_IMAGES/$output_image"; fi
         if [ -z "$source_dir" ] || [ -z "$output_image" ] || [ -z "$fs" ]; then echo -e "${RED}Error: SOURCE_DIR/OUTPUT_IMAGE/FILESYSTEM not set.${RESET}"; exit 1; fi
         
         local mount_method=""
@@ -1011,10 +1010,10 @@ run_non_interactive() {
     elif [ "$ACTION" == "super_unpack" ]; then
         local input_image="${CONFIG[INPUT_IMAGE]}"
         local project_name="${CONFIG[PROJECT_NAME]}"
-        if [[ "$input_image" != /* ]]; then input_image="INPUT_IMAGES/$input_image"; fi
+        if [[ "$input_image" != /* ]]; then input_image="$SCRIPT_DIR/INPUT_IMAGES/$input_image"; fi
         if [ -z "$input_image" ] || [ -z "$project_name" ]; then echo -e "${RED}Error: INPUT_IMAGE/PROJECT_NAME not set.${RESET}"; exit 1; fi
         
-        local project_dir="SUPER_TOOLS/$project_name"
+        local project_dir="$SCRIPT_DIR/SUPER_TOOLS/$project_name"
         if [ -d "$project_dir" ]; then echo -e "${RED}Error: Project '$project_name' already exists.${RESET}"; exit 1; fi
 
         echo -e "\n${BOLD}Super Unpack Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $input_image\n  - ${YELLOW}Project Name:${RESET} $project_name"
@@ -1036,9 +1035,9 @@ run_non_interactive() {
     # --- Non-interactive super repack ---
     elif [ "$ACTION" == "super_repack" ]; then
         local project_name="${CONFIG[PROJECT_NAME]}"; local output_image="${CONFIG[OUTPUT_IMAGE]}"
-        if [[ "$output_image" != /* ]]; then output_image="REPACKED_IMAGES/$output_image"; fi
+        if [[ "$output_image" != /* ]]; then output_image="$SCRIPT_DIR/REPACKED_IMAGES/$output_image"; fi
         if [ -z "$project_name" ] || [ -z "$output_image" ]; then echo -e "${RED}Error: PROJECT_NAME/OUTPUT_IMAGE not set.${RESET}"; exit 1; fi
-        local project_dir="SUPER_TOOLS/$project_name"; local final_config_file="${project_dir}/project.conf"
+        local project_dir="$SCRIPT_DIR/SUPER_TOOLS/$project_name"; local final_config_file="${project_dir}/project.conf"
         if [ ! -f "$final_config_file" ]; then echo -e "${RED}Error: 'project.conf' not found in '$project_dir'.${RESET}"; exit 1; fi
         
         source "$final_config_file"
@@ -1088,7 +1087,7 @@ run_non_interactive() {
     else
         echo -e "${RED}Error: Invalid ACTION '${ACTION}'.${RESET}"; exit 1
     fi
-    trap 'cleanup_and_exit' INT TERM EXIT
+    exit 0
 }
 
 # --- Main Execution Logic ---
