@@ -192,7 +192,7 @@ get_fs_param() {
 }
 
 # Register cleanup function to run on script exit or interrupt
-trap cleanup EXIT INT TERM
+# trap cleanup EXIT INT TERM
 
 # Create or recreate mount directory
 if [ -d "$MOUNT_DIR" ]; then
@@ -515,21 +515,16 @@ if [ $? -eq 0 ]; then
 
   # Transfer ownership to actual user
   if [ -n "$SUDO_USER" ]; then
-    chown -R "$SUDO_USER:$SUDO_USER" "$EXTRACT_DIR"
+    chown -R "$SUDO_USER:$SUDO_USER" "$EXTRACT_DIR" || true
   fi
 else
   echo -e "${RED}${BOLD}[✗] Error occurred during extraction${RESET}"
+  cleanup
   exit 1
 fi
 
 # Unmount the image
-if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
-  if [ "$MOUNT_METHOD" = "fuse" ]; then
-    fusermount -u "$MOUNT_DIR"
-  else
-    umount "$MOUNT_DIR"
-  fi
-fi
+cleanup
 
 if [ "$INTERACTIVE_MODE" = true ]; then
     echo -e "\n${GREEN}${BOLD}Done!${RESET}"
