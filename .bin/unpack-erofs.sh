@@ -25,12 +25,17 @@ print_banner() {
 IMAGE_FILE=""
 OUTPUT_DIR_OVERRIDE=""
 INTERACTIVE_MODE=true
+QUIET=false
 
 # Manual parsing loop
 while (( "$#" )); do
   case "$1" in
     --no-banner)
       INTERACTIVE_MODE=false
+      shift
+      ;;
+    --quiet)
+      QUIET=true
       shift
       ;;
     -*) # Catch any unexpected flags
@@ -392,7 +397,7 @@ find "$MOUNT_DIR" -mindepth 1 | while read -r item; do
     processed=$((processed + 1))
     percentage=$((processed * 100 / total_items))
     
-    if [ $((processed % 50)) -eq 0 ]; then
+    if [ $((processed % 50)) -eq 0 ] && [ "$QUIET" = false ]; then
         echo -ne "\r${BLUE}[${spinner[$((spin++ % 10))]}] Processing: ${percentage}% (${processed}/${total_items})${RESET}"
     fi
     
@@ -422,7 +427,7 @@ echo -e "${BLUE}Calculating original file checksums...${RESET}"
 (cd "$MOUNT_DIR" && find . -type f -exec sha256sum {} \;) > "${REPACK_INFO}/original_checksums.txt" &
 spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
 spin=0
-while kill -0 $! 2>/dev/null; do
+while [ "$QUIET" = false ] && kill -0 $! 2>/dev/null; do
     # Clear entire line first
     echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Generating checksums${RESET}"
     sleep 0.1

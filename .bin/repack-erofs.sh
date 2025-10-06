@@ -12,6 +12,7 @@ EXT4_OVERHEAD_PERCENT="" # Now empty by default
 EROFS_COMP=""
 EROFS_LEVEL=""
 NO_BANNER=false
+QUIET=false
 
 # Parse positional arguments first
 if [ $# -ge 1 ]; then
@@ -34,6 +35,7 @@ while [[ $# -gt 0 ]]; do
         --erofs-compression) EROFS_COMP="$2"; shift; shift ;;
         --erofs-level) EROFS_LEVEL="$2"; shift; shift ;;
         --no-banner) NO_BANNER=true; shift ;;
+        --quiet) QUIET=true; shift ;;
         *) shift ;;
     esac
 done
@@ -235,7 +237,7 @@ restore_attributes() {
             [ -n "$stored_context" ] && chcon "$stored_context" "$item" 2>/dev/null || true
         fi
         
-        echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Mapping contexts: ${percentage}% (${processed}/${DIR_COUNT})${RESET}"
+        if [ "$QUIET" = false ]; then echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Mapping contexts: ${percentage}% (${processed}/${DIR_COUNT})${RESET}"; fi
     done
     echo -e "\r\033[K${GREEN}[✓] Directory attributes mapped${RESET}\n"
 
@@ -275,7 +277,7 @@ restore_attributes() {
             [ -n "$stored_context" ] && chcon "$stored_context" "$item" 2>/dev/null || true
         fi
 
-        echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Restoring contexts: ${percentage}% (${processed}/${FILE_COUNT})${RESET}"
+        if [ "$QUIET" = false ]; then echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Restoring contexts: ${percentage}% (${processed}/${FILE_COUNT})${RESET}"; fi
     done
     echo -e "\r\033[K${GREEN}[✓] File attributes restored${RESET}\n"
 }
@@ -300,7 +302,7 @@ verify_modifications() {
         file=$(echo "$line" | cut -d' ' -f3-)
         
         # Show spinner while processing
-        echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Analyzing files...${RESET}"
+        if [ "$QUIET" = false ]; then echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Analyzing files...${RESET}"; fi
         
         if ! grep -q "$checksum.*$file" "${REPACK_INFO}/original_checksums.txt" 2>/dev/null; then
             modified_files=$((modified_files + 1))
@@ -327,7 +329,7 @@ show_copy_progress() {
         total_hr=$(numfmt --to=iec-i --suffix=B "$total_size")
         
         # Clear entire line with \033[K before printing
-        echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Copying to work directory: ${percentage}% (${current_hr}/${total_hr})${RESET}"
+        if [ "$QUIET" = false ]; then echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Copying to work directory: ${percentage}% (${current_hr}/${total_hr})${RESET}"; fi
         sleep 0.1
     done
     

@@ -449,7 +449,7 @@ run_unpack_interactive() {
                 
                 echo -e "\n${RED}${BOLD}Starting unpack. DO NOT INTERRUPT...${RESET}\n"
                 trap '' INT
-                set -e; bash "$UNPACK_SCRIPT_PATH" "$input_image" "$output_dir" --no-banner; set +e
+                set -e; bash "$UNPACK_SCRIPT_PATH" "$input_image" "$output_dir" --no-banner --quiet; set +e
                 trap 'cleanup_and_exit' INT TERM EXIT
                 
                 echo -e "\n${GREEN}${BOLD}Unpack successful. Files are in: $output_dir${RESET}"
@@ -523,7 +523,7 @@ run_repack_interactive() {
                 echo -e "\n${RED}${BOLD}Starting repack. DO NOT INTERRUPT...${RESET}"; trap '' INT; local repack_args=("--fs" "$fs")
                 if [ "$fs" == "erofs" ]; then repack_args+=("--erofs-compression" "$erofs_comp"); if [ -n "$erofs_level" ]; then repack_args+=("--erofs-level" "$erofs_level"); fi; else repack_args+=("--ext4-mode" "$repack_mode"); if [ "$repack_mode" == "flexible" ]; then repack_args+=("--ext4-overhead-percent" "$overhead_percent"); fi; fi
                 
-                set -e; bash "$REPACK_SCRIPT_PATH" "$source_dir" "$output_image" "${repack_args[@]}" --no-banner; set +e; trap 'cleanup_and_exit' INT TERM EXIT; echo
+                set -e; bash "$REPACK_SCRIPT_PATH" "$source_dir" "$output_image" "${repack_args[@]}" --no-banner --quiet; set +e; trap 'cleanup_and_exit' INT TERM EXIT; echo
                 
                 local final_image_path="$output_image"
                 if [ -f "$output_image" ]; then
@@ -592,7 +592,7 @@ run_super_unpack_interactive() {
         
         # Run the unpack in the background so we can show a spinner
         # We redirect output to /dev/null because we only care about success or failure.
-        bash "$UNPACK_SCRIPT_PATH" "${logical_dir}/${part_name}.img" "${extracted_dir}/${part_name}" --no-banner >/dev/null 2>&1 &
+        bash "$UNPACK_SCRIPT_PATH" "${logical_dir}/${part_name}.img" "${extracted_dir}/${part_name}" --no-banner --quiet >/dev/null 2>&1 &
         local pid=$!
 
         while kill -0 $pid 2>/dev/null; do
@@ -942,6 +942,7 @@ run_advanced_tools_menu() {
 run_non_interactive() {
     set -e
     local config_file="$1"
+    local quiet_mode="${2:-false}"
     echo -e "\n${BLUE}Running non-interactive with: ${BOLD}$config_file${RESET}"
     declare -A CONFIG
     while IFS='=' read -r key value; do if [[ ! "$key" =~ ^\# && -n "$key" ]]; then CONFIG["$key"]="$value"; fi; done < "$config_file"
@@ -956,7 +957,9 @@ run_non_interactive() {
         if [ -z "$input_image" ] || [ -z "$extract_dir" ]; then echo -e "${RED}Error: INPUT_IMAGE/EXTRACT_DIR not set.${RESET}"; exit 1; fi
         
         echo -e "\n${BOLD}Unpack Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $input_image\n  - ${YELLOW}Output Directory:${RESET} $extract_dir"
-        echo -e "\n${RED}${BOLD}Starting unpack. DO NOT INTERRUPT...${RESET}\n"; bash "$UNPACK_SCRIPT_PATH" "$input_image" "$extract_dir" --no-banner
+        local quiet_flag=""
+        [ "$quiet_mode" = true ] && quiet_flag="--quiet"
+        echo -e "\n${RED}${BOLD}Starting unpack. DO NOT INTERRUPT...${RESET}\n"; bash "$UNPACK_SCRIPT_PATH" "$input_image" "$extract_dir" --no-banner $quiet_flag
         echo -e "\n${GREEN}${BOLD}Success: Image unpacked to $extract_dir${RESET}"
 
     elif [ "$ACTION" == "repack" ]; then
@@ -993,7 +996,10 @@ run_non_interactive() {
         fi
         echo -e "  - ${YELLOW}Create Sparse IMG:${RESET}  $create_sparse"
         
-        echo -e "\n${RED}${BOLD}Starting repack. DO NOT INTERRUPT...${RESET}"; bash "$REPACK_SCRIPT_PATH" "$source_dir" "$output_image" "${repack_args[@]}" --no-banner
+        echo -e "\n${RED}${BOLD}Starting repack. DO NOT INTERRUPT...${RESET}"; 
+        local quiet_flag=""
+        [ "$quiet_mode" = true ] && quiet_flag="--quiet"
+        bash "$REPACK_SCRIPT_PATH" "$source_dir" "$output_image" "${repack_args[@]}" --no-banner $quiet_flag
 
         local final_image_path="$output_image"
         if [ -f "$output_image" ]; then
@@ -1027,7 +1033,9 @@ run_non_interactive() {
             local part_name
             part_name=$(basename "$logical_img" .img)
             echo -e "--- Unpacking logical partition: ${part_name} ---"
-            bash "$UNPACK_SCRIPT_PATH" "$logical_img" "$project_dir/extracted_content/${part_name}" --no-banner &>/dev/null
+            local quiet_flag=""
+            [ "$quiet_mode" = true ] && quiet_flag="--quiet"
+            bash "$UNPACK_SCRIPT_PATH" "$logical_img" "$project_dir/extracted_content/${part_name}" --no-banner $quiet_flag &>/dev/null
         done
         rm -rf "$project_dir/logical_partitions"
         echo -e "\n${GREEN}${BOLD}Success: Super image unpacked to $project_dir${RESET}"
@@ -1074,7 +1082,7 @@ run_non_interactive() {
                     repack_args+=("--ext4-overhead-percent" "${!percent_var}")
                 fi
             fi
-            bash "$REPACK_SCRIPT_PATH" "$project_dir/extracted_content/${part_name}" "$logical_dir/${part_name}.img" "${repack_args[@]}" --no-banner &>/dev/null
+            bash "$REPACK_SCRIPT_PATH" "$project_dir/extracted_content/${part_name}" "$logical_dir/${part_name}.img" "${repack_args[@]}" --no-banner $quiet_flag &>/dev/null
         done
 
         echo "--- Assembling final super image ---"
@@ -1096,21 +1104,49 @@ if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}This script requires root privileges. Please run with sudo.${RESET}"; exit 1
 fi
 
-if [ "$#" -gt 1 ] || { [ -n "$1" ] && [[ "$1" != "--conf="* ]]; }; then
-    print_usage "$1"
+# Parse command line arguments
+CONF_FILE=""
+QUIET_MODE=false
+UNKNOWN_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --conf=*)
+            CONF_FILE="${1#*=}"
+            shift
+            ;;
+        --quiet)
+            QUIET_MODE=true
+            shift
+            ;;
+        *)
+            UNKNOWN_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Validate arguments
+if [ ${#UNKNOWN_ARGS[@]} -gt 0 ]; then
+    echo -e "${RED}Error: Unknown argument(s): ${UNKNOWN_ARGS[*]}${RESET}" >&2
+    print_usage
+    exit 1
 fi
 
-# Handle the valid non-interactive case
-if [[ "$1" == "--conf="* ]]; then
-    conf_file="${1#*=}"
-    if [ ! -f "$conf_file" ]; then
-        echo -e "${RED}Error: Config file not found: '$conf_file'${RESET}"; exit 1
+# Determine mode
+if [ -n "$CONF_FILE" ]; then
+    # Non-interactive mode
+    if [ ! -f "$CONF_FILE" ]; then
+        echo -e "${RED}Error: Config file not found: '$CONF_FILE'${RESET}"; exit 1
     fi
     print_banner
     check_dependencies
     create_workspace
-    run_non_interactive "$conf_file"
+    run_non_interactive "$CONF_FILE" "$QUIET_MODE"
     exit 0
+else
+    # Interactive mode - continue to main menu
+    :
 fi
 
 set +e
