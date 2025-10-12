@@ -277,6 +277,10 @@ while (( "$#" )); do
       INTERACTIVE_MODE=false
       shift # Consume the flag
       ;;
+    --raw)
+      POSITIONAL_ARGS+=("$1")
+      shift # Consume the flag
+      ;;
     -*)
       echo -e "${RED}Error: Unknown global option $1${RESET}" >&2
       print_usage
