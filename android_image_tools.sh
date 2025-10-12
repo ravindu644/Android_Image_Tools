@@ -471,6 +471,7 @@ run_repack_interactive() {
             2)
                 local partition_name=$(basename "$source_dir" | sed 's/^extracted_//'); local default_output_image="$SCRIPT_DIR/REPACKED_IMAGES/${partition_name}_repacked.img"; clear; print_banner; echo
                 read -rp "$(echo -e ${BLUE}"Step 2: Enter output image path [${BOLD}${default_output_image}${BLUE}]: "${RESET})" output_image
+                output_image="$(echo "$output_image" | tr -d "\"'")"
                 output_image=${output_image:-$default_output_image}; step=3;;
             3)
                 local mount_method=""
@@ -494,7 +495,7 @@ run_repack_interactive() {
             4)
                 if [ "$fs" == "erofs" ]; then
                     local erofs_options=("none" "lz4" "lz4hc" "deflate" "Back"); select_option "Step 4: Select EROFS compression:" "${erofs_options[@]}"; if [ "$AIT_CHOICE_INDEX" -eq 4 ]; then step=3; continue; fi
-                    erofs_comp=${erofs_options[$AIT_CHOICE_INDEX]}; erofs_level=""; if [[ "$erofs_comp" == "lz4hc" || "$erofs_comp" == "deflate" ]]; then read -rp "$(echo -e ${BLUE}"Step 4a: Level (lz4hc 0-12, deflate 0-9): "${RESET})" erofs_level; fi
+                    erofs_comp=${erofs_options[$AIT_CHOICE_INDEX]}; erofs_level=""; if [[ "$erofs_comp" == "lz4hc" || "$erofs_comp" == "deflate" ]]; then read -rp "$(echo -e ${BLUE}"Step 4a: Level (lz4hc 0-12, deflate 0-9): "${RESET})" erofs_level; erofs_level="$(echo "$erofs_level" | tr -d "\"'")"; fi
                 else
                     local ext4_options=("Strict (clone original)" "Flexible (auto-resize)" "Back"); select_option "Step 4: Select EXT4 repack mode:" "${ext4_options[@]}"; if [ "$AIT_CHOICE_INDEX" -eq 2 ]; then step=3; continue; fi
                     if [ "$AIT_CHOICE_INDEX" -eq 0 ]; then
@@ -505,7 +506,7 @@ run_repack_interactive() {
                         case $AIT_CHOICE_INDEX in
                             0) overhead_percent=10 ;;
                             2) overhead_percent=20 ;;
-                            3) read -rp "$(echo -e ${BLUE}"Enter custom percentage: "${RESET})" overhead_percent ;;
+                            3) read -rp "$(echo -e ${BLUE}"Enter custom percentage: "${RESET})" overhead_percent; overhead_percent="$(echo "$overhead_percent" | tr -d "\"'")" ;;
                             *) overhead_percent=15 ;;
                         esac
                         overhead_percent=${overhead_percent:-15}
@@ -547,7 +548,8 @@ run_super_unpack_interactive() {
     super_image="$AIT_SELECTED_ITEM"
 
     clear; print_banner; echo
-    read -rp "$(echo -e ${BLUE}"Enter a project name (no spaces): "${RESET})" session_name
+    read -rp "$(echo -e ${BLUE}"Enter a project name: "${RESET})" session_name
+    session_name="$(echo "$session_name" | tr -d "\"'" | tr ' ' '_')"
     if [ -z "$session_name" ]; then
         echo -e "\n${RED}Error: Project name cannot be empty.${RESET}"; sleep 2; return
     fi
@@ -708,6 +710,7 @@ run_super_create_config_interactive() {
                 config_lines["${part_name^^}_EROFS_COMPRESSION"]="$erofs_comp"
                 if [[ "$erofs_comp" == "lz4hc" || "$erofs_comp" == "deflate" ]]; then
                     read -rp "$(echo -e ${BLUE}"Enter level for ${erofs_comp} (lz4hc 0-12, deflate 0-9): "${RESET})" erofs_level
+                    erofs_level="$(echo "$erofs_level" | tr -d "\"'")"
                     config_lines["${part_name^^}_EROFS_LEVEL"]="$erofs_level"
                 fi
                 current_index=$((current_index + 1)); break
@@ -724,7 +727,7 @@ run_super_create_config_interactive() {
                     case $AIT_CHOICE_INDEX in
                         0) overhead_percent=10 ;;
                         2) overhead_percent=20 ;;
-                        3) read -rp "$(echo -e ${BLUE}"Enter custom percentage: "${RESET})" overhead_percent ;;
+                        3) read -rp "$(echo -e ${BLUE}"Enter custom percentage: "${RESET})" overhead_percent; overhead_percent="$(echo "$overhead_percent" | tr -d "\"'")" ;;
                         *) overhead_percent=15 ;;
                     esac
                     config_lines["${part_name^^}_EXT4_OVERHEAD_PERCENT"]="${overhead_percent:-15}"
@@ -808,6 +811,7 @@ run_super_repack_interactive() {
     clear; print_banner
     local default_output_image="$SCRIPT_DIR/REPACKED_IMAGES/super_$(basename "$project_dir").img"
     read -rp "$(echo -e ${BLUE}"Enter path for final super image [${BOLD}${default_output_image}${BLUE}]: "${RESET})" output_image
+    output_image="$(echo "$output_image" | tr -d "\"'")"
     output_image=${output_image:-$default_output_image}
     
     select_option "Create a flashable sparse image?" "Yes (Recommended)" "No (Raw Image)"
