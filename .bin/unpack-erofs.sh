@@ -1,3 +1,4 @@
+
 #!/bin/bash
 # EROFS Image Unpacker Script with File Attribute Preservation
 # Usage: ./unpack_erofs.sh <image_file> [output_directory] [--no-banner]
@@ -120,7 +121,15 @@ cleanup() {
   echo -e "\n${YELLOW}Cleaning up...${RESET}"
   if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
     echo -e "Unmounting ${MOUNT_DIR}..."
-    umount "$MOUNT_DIR" 2>/dev/null || fusermount -u "$MOUNT_DIR" 2>/dev/null || true
+    
+    # Try different unmount methods in order of preference
+    if [ "$MOUNT_METHOD" = "fuse" ]; then
+      # For FUSE mounts, try fusermount first, then fallback to umount
+      fusermount -u "$MOUNT_DIR" 2>/dev/null || umount "$MOUNT_DIR" 2>/dev/null || true
+    else
+      # For kernel mounts, try umount first, then fallback to fusermount
+      umount "$MOUNT_DIR" 2>/dev/null || fusermount -u "$MOUNT_DIR" 2>/dev/null || true
+    fi
   fi
   
   # Remove raw image if it was created
@@ -129,13 +138,21 @@ cleanup() {
     rm -f "$RAW_IMAGE" 2>/dev/null || true
   fi
   
-  # Remove mount directory
+  # Remove mount directory and all contents
   if [ -d "$MOUNT_DIR" ]; then
     echo -e "Removing mount directory..."
-    rm -rf "$MOUNT_DIR" 2>/dev/null || true
+    # Use a more aggressive approach to handle stubborn files
+    if ! rm -rf "$MOUNT_DIR" 2>/dev/null; then
+      echo -e "${YELLOW}Warning: Some files in mount directory may still be in use${RESET}"
+      # Try to kill any processes using the mount point
+      fuser -km "$MOUNT_DIR" 2>/dev/null || true
+      # Wait a moment then try again
+      sleep 1
+      rm -rf "$MOUNT_DIR" 2>/dev/null || true
+    fi
   fi
   
-  echo -e "Cleanup completed."
+  echo -e "${GREEN}Cleanup completed.${RESET}"
 }
 
 # Function to explicitly handle 'needs journal recovery' state
@@ -192,7 +209,7 @@ get_fs_param() {
 }
 
 # Register cleanup function to run on script exit or interrupt
-# trap cleanup EXIT INT TERM
+trap cleanup EXIT INT TERM
 
 # Create or recreate mount directory
 if [ -d "$MOUNT_DIR" ]; then
@@ -523,9 +540,7 @@ else
   exit 1
 fi
 
-# Unmount the image
-cleanup
-
+# Script completion
 if [ "$INTERACTIVE_MODE" = true ]; then
     echo -e "\n${GREEN}${BOLD}Done!${RESET}"
 fi
