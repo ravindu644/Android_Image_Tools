@@ -414,6 +414,7 @@ cleanup_workspace() {
 
 # --- Single Image Tools ---
 run_unpack_interactive() {
+    local quiet_mode="$1"
     local input_image
     local output_dir
     local step=1
@@ -449,7 +450,9 @@ run_unpack_interactive() {
                 
                 echo -e "\n${RED}${BOLD}Starting unpack. DO NOT INTERRUPT...${RESET}\n"
                 trap '' INT
-                set -e; bash "$UNPACK_SCRIPT_PATH" "$input_image" "$output_dir" --no-banner --quiet; set +e
+                local quiet_flag=""
+                [ "$quiet_mode" = true ] && quiet_flag="--quiet"
+                set -e; bash "$UNPACK_SCRIPT_PATH" "$input_image" "$output_dir" --no-banner $quiet_flag; set +e
                 trap 'cleanup_and_exit' INT TERM EXIT
                 
                 echo -e "\n${GREEN}${BOLD}Unpack successful. Files are in: $output_dir${RESET}"
@@ -461,6 +464,7 @@ run_unpack_interactive() {
 }
 
 run_repack_interactive() {
+    local quiet_mode="$1"
     local source_dir output_image fs repack_mode erofs_comp erofs_level create_sparse overhead_percent
     local step=1
     while true; do
@@ -524,7 +528,9 @@ run_repack_interactive() {
                 echo -e "\n${RED}${BOLD}Starting repack. DO NOT INTERRUPT...${RESET}"; trap '' INT; local repack_args=("--fs" "$fs")
                 if [ "$fs" == "erofs" ]; then repack_args+=("--erofs-compression" "$erofs_comp"); if [ -n "$erofs_level" ]; then repack_args+=("--erofs-level" "$erofs_level"); fi; else repack_args+=("--ext4-mode" "$repack_mode"); if [ "$repack_mode" == "flexible" ]; then repack_args+=("--ext4-overhead-percent" "$overhead_percent"); fi; fi
                 
-                set -e; bash "$REPACK_SCRIPT_PATH" "$source_dir" "$output_image" "${repack_args[@]}" --no-banner --quiet; set +e; trap 'cleanup_and_exit' INT TERM EXIT; echo
+                local quiet_flag=""
+                [ "$quiet_mode" = true ] && quiet_flag="--quiet"
+                set -e; bash "$REPACK_SCRIPT_PATH" "$source_dir" "$output_image" "${repack_args[@]}" --no-banner $quiet_flag; set +e; trap 'cleanup_and_exit' INT TERM EXIT; echo
                 
                 local final_image_path="$output_image"
                 if [ -f "$output_image" ]; then
@@ -541,6 +547,7 @@ run_repack_interactive() {
 
 # --- Super Kitchen Functions ---
 run_super_unpack_interactive() {
+    local quiet_mode="$1"
     local super_image session_name project_dir metadata_dir logical_dir extracted_dir
 
     select_item "Select super image to unpack:" "INPUT_IMAGES" "image_file"
@@ -594,7 +601,9 @@ run_super_unpack_interactive() {
         
         # Run the unpack in the background so we can show a spinner
         # We redirect output to /dev/null because we only care about success or failure.
-        bash "$UNPACK_SCRIPT_PATH" "${logical_dir}/${part_name}.img" "${extracted_dir}/${part_name}" --no-banner --quiet >/dev/null 2>&1 &
+        local quiet_flag=""
+        [ "$quiet_mode" = true ] && quiet_flag="--quiet"
+        bash "$UNPACK_SCRIPT_PATH" "${logical_dir}/${part_name}.img" "${extracted_dir}/${part_name}" --no-banner $quiet_flag >/dev/null 2>&1 &
         local pid=$!
 
         while kill -0 $pid 2>/dev/null; do
@@ -789,6 +798,7 @@ run_super_create_config_interactive() {
 
 run_super_repack_interactive() {
 
+    local quiet_mode="$1"
     local project_dir metadata_dir part_config_file logical_dir extracted_dir
 
     select_item "Select project to repack:" "SUPER_TOOLS" "dir"
@@ -847,8 +857,13 @@ run_super_repack_interactive() {
             fi
         fi
         
-        # Use a default of 'false' if the variable isn't in the config file
-        if [ "${ENABLE_VERBOSE_LOGS:-false}" == "true" ]; then
+        # Use project config ENABLE_VERBOSE_LOGS first, then fallback to command line quiet_mode
+        local use_verbose_logs="${ENABLE_VERBOSE_LOGS:-false}"
+        if [ "$use_verbose_logs" != "true" ] && [ "$quiet_mode" = true ]; then
+            use_verbose_logs="false"
+        fi
+        
+        if [ "$use_verbose_logs" == "true" ]; then
             # --- VERBOSE LOGGING PATH ---
             echo -e "\n${YELLOW}--- (${current}/${total}) Repacking: ${BOLD}${part_name}${RESET} ---${RESET}"
             bash "$REPACK_SCRIPT_PATH" "${project_dir}/extracted_content/${part_name}" "${logical_dir}/${part_name}.img" "${repack_args[@]}" --no-banner
@@ -922,9 +937,9 @@ run_super_kitchen_menu() {
         select_option "Super Image Kitchen:" "${kitchen_options[@]}"
         
         case $AIT_CHOICE_INDEX in
-            0) run_super_unpack_interactive ;;
+            0) run_super_unpack_interactive "$QUIET_MODE" ;;
             1) run_super_create_config_interactive ;;
-            2) run_super_repack_interactive ;;
+            2) run_super_repack_interactive "$QUIET_MODE" ;;
             3) break ;;
         esac
     done
@@ -1167,8 +1182,8 @@ while true; do
     select_option "Select an action:" "${main_options[@]}"; choice=$AIT_CHOICE_INDEX
     
     case $choice in
-        0) run_unpack_interactive;;
-        1) run_repack_interactive;;
+        0) run_unpack_interactive "$QUIET_MODE";;
+        1) run_repack_interactive "$QUIET_MODE";;
         2) generate_config_file; read -rp $'\nPress Enter to continue...';;
         3) run_advanced_tools_menu;;
         4) cleanup_workspace;;
