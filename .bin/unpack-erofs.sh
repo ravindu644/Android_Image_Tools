@@ -388,7 +388,7 @@ echo ""
 
 # First get root directory context specifically
 echo -e "${BLUE}Capturing root directory attributes...${RESET}"
-ROOT_CONTEXT=$(ls -dZ "$MOUNT_DIR" | awk '{print $1}')
+ROOT_CONTEXT=$(getfattr -m - -d "$MOUNT_DIR" 2>/dev/null | grep '^security\.selinux=' | cut -d'"' -f2 || echo "")
 ROOT_STATS=$(stat -c "%u %g %a" "$MOUNT_DIR")
 
 # Create config files with root attributes first
@@ -428,8 +428,8 @@ find "$MOUNT_DIR" -mindepth 1 -print0 | while IFS= read -r -d $'\0' item; do
         # '|| true' prevents 'set -e' from exiting on broken symlinks or permission errors.
         target=$(readlink "$item" || true)
         stats=$(stat -c "%u %g %a" "$item" 2>/dev/null || true)
-        # Using 'stat -c %C' is more robust for getting SELinux context than parsing 'ls'.
-        context=$(stat -c %C "$item" 2>/dev/null || true)
+        # Using getfattr for SELinux context extraction.
+        context=$(getfattr -m - -d "$item" 2>/dev/null | grep '^security\.selinux=' | cut -d'"' -f2 || echo "")
 
         # Only write to the info file if all data was successfully retrieved.
         if [ -n "$target" ] && [ -n "$stats" ] && [ -n "$context" ] && [ "$context" != "?" ]; then
@@ -438,7 +438,7 @@ find "$MOUNT_DIR" -mindepth 1 -print0 | while IFS= read -r -d $'\0' item; do
     else
         # Handle regular files and directories.
         stats=$(stat -c "%u %g %a" "$item" 2>/dev/null || true)
-        context=$(stat -c %C "$item" 2>/dev/null || true)
+        context=$(getfattr -m - -d "$item" 2>/dev/null | grep '^security\.selinux=' | cut -d'"' -f2 || echo "")
 
         # Write attributes to their respective config files if valid.
         [ -n "$stats" ] && echo "$rel_path $stats" >> "$FS_CONFIG_FILE"
