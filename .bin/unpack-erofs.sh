@@ -431,8 +431,8 @@ find "$MOUNT_DIR" -mindepth 1 -print0 | while IFS= read -r -d $'\0' item; do
         # Using getfattr for SELinux context extraction.
         context=$(getfattr -m - -d "$item" 2>/dev/null | grep '^security\.selinux=' | cut -d'"' -f2 || echo "")
 
-        # Only write to the info file if all data was successfully retrieved.
-        if [ -n "$target" ] && [ -n "$stats" ] && [ -n "$context" ] && [ "$context" != "?" ]; then
+        # Only write to the info file if target and stats were retrieved.
+        if [ -n "$target" ] && [ -n "$stats" ]; then
             echo "$rel_path $target $stats $context" >> "$SYMLINK_INFO"
         fi
     else
