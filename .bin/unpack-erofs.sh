@@ -1,4 +1,3 @@
-
 #!/bin/bash
 # EROFS Image Unpacker Script with File Attribute Preservation
 # Usage: ./unpack_erofs.sh <image_file> [output_directory] [--no-banner]
@@ -410,32 +409,44 @@ spin=0
 SYMLINK_INFO="${REPACK_INFO}/symlink_info.txt"
 echo "# Symlink info extracted from $IMAGE_FILE on $(date)" > "$SYMLINK_INFO"
 
-find "$MOUNT_DIR" -mindepth 1 | while read -r item; do
+# Use find -print0 and a while-read loop for robust handling of all filenames.
+# This prevents errors with filenames containing spaces, newlines, or other special characters.
+find "$MOUNT_DIR" -mindepth 1 -print0 | while IFS= read -r -d $'\0' item; do
     processed=$((processed + 1))
-    percentage=$((processed * 100 / total_items))
-    
+    # Avoid division by zero if total_items is 0
+    percentage=$((total_items > 0 ? processed * 100 / total_items : 0))
+
+    # Update spinner progress indicator
     if [ $((processed % 50)) -eq 0 ] && [ "$QUIET" = false ]; then
         echo -ne "\r${BLUE}[${spinner[$((spin++ % 10))]}] Processing: ${percentage}% (${processed}/${total_items})${RESET}"
     fi
-    
+
     rel_path=${item#$MOUNT_DIR}
-    
+
     # Special handling for symlinks
     if [ -L "$item" ]; then
-        target=$(readlink "$item")
-        stats=$(stat -c "%u %g %a" "$item" 2>/dev/null)
-        context=$(ls -dZ "$item" 2>/dev/null | awk '{print $1}')
-        echo "$rel_path $target $stats $context" >> "$SYMLINK_INFO"
+        # '|| true' prevents 'set -e' from exiting on broken symlinks or permission errors.
+        target=$(readlink "$item" || true)
+        stats=$(stat -c "%u %g %a" "$item" 2>/dev/null || true)
+        # Using 'stat -c %C' is more robust for getting SELinux context than parsing 'ls'.
+        context=$(stat -c %C "$item" 2>/dev/null || true)
+
+        # Only write to the info file if all data was successfully retrieved.
+        if [ -n "$target" ] && [ -n "$stats" ] && [ -n "$context" ] && [ "$context" != "?" ]; then
+            echo "$rel_path $target $stats $context" >> "$SYMLINK_INFO"
+        fi
     else
-        # Get basic attributes and context
-        stats=$(stat -c "%u %g %a" "$item" 2>/dev/null)
-        context=$(ls -dZ "$item" 2>/dev/null | awk '{print $1}')
-        
+        # Handle regular files and directories.
+        stats=$(stat -c "%u %g %a" "$item" 2>/dev/null || true)
+        context=$(stat -c %C "$item" 2>/dev/null || true)
+
+        # Write attributes to their respective config files if valid.
         [ -n "$stats" ] && echo "$rel_path $stats" >> "$FS_CONFIG_FILE"
         [ -n "$context" ] && [ "$context" != "?" ] && echo "$rel_path $context" >> "$FILE_CONTEXTS_FILE"
     fi
 done
-echo -e "\r${GREEN}[✓] Attributes extracted successfully${RESET}"
+# Clear the progress line and print the completion message.
+echo -e "\r\033[K${GREEN}[✓] Attributes extracted successfully${RESET}"
 
 echo ""
 
