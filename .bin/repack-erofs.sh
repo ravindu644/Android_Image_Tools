@@ -188,7 +188,16 @@ restore_attributes() {
             full_path="$1$path"
             [ ! -L "$full_path" ] && ln -sf "$target" "$full_path"
             chown -h "$uid:$gid" "$full_path" 2>/dev/null || true
-            [ -n "$context" ] && chcon -h "$context" "$full_path" 2>/dev/null || true
+            
+            # Try to set context from symlink_info, otherwise fall back to file_contexts
+            if [ -n "$context" ] && [ "$context" != "?" ]; then
+                setfattr -h -n security.selinux -v "$context" "$full_path" 2>/dev/null || true
+            else
+                # Look up context using the same pattern matching as for files/directories
+                context_pattern=$(find_matching_pattern "$path" "$FILE_CONTEXTS_FILE")
+                fallback_context=$(echo "$context_pattern" | awk '{$1=""; print $0}' | sed 's/^ //')
+                [ -n "$fallback_context" ] && setfattr -h -n security.selinux -v "$fallback_context" "$full_path" 2>/dev/null || true
+            fi
         done < "${REPACK_INFO}/symlink_info.txt"
     fi
     
@@ -225,7 +234,7 @@ restore_attributes() {
             
             context_pattern=$(find_matching_pattern "$rel_path" "$FILE_CONTEXTS_FILE")
             context=$(echo "$context_pattern" | awk '{$1=""; print $0}' | sed 's/^ //')
-            [ -n "$context" ] && chcon "$context" "$item" 2>/dev/null || true
+            [ -n "$context" ] && setfattr -n security.selinux -v "$context" "$item" 2>/dev/null || true
         else
             # Existing directory: restore original attributes
             uid=$(echo "$stored_attrs" | awk '{print $1}')
@@ -234,7 +243,7 @@ restore_attributes() {
             
             chown "$uid:$gid" "$item" 2>/dev/null || true
             chmod "$mode" "$item" 2>/dev/null || true
-            [ -n "$stored_context" ] && chcon "$stored_context" "$item" 2>/dev/null || true
+            [ -n "$stored_context" ] && setfattr -n security.selinux -v "$stored_context" "$item" 2>/dev/null || true
         fi
         
         if [ "$QUIET" = false ]; then echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Mapping contexts: ${percentage}% (${processed}/${DIR_COUNT})${RESET}"; fi
@@ -265,7 +274,7 @@ restore_attributes() {
             
             context_pattern=$(find_matching_pattern "$rel_path" "$FILE_CONTEXTS_FILE")
             context=$(echo "$context_pattern" | awk '{$1=""; print $0}' | sed 's/^ //')
-            [ -n "$context" ] && chcon "$context" "$item" 2>/dev/null || true
+            [ -n "$context" ] && setfattr -n security.selinux -v "$context" "$item" 2>/dev/null || true
         else
             # Existing file: restore original attributes
             uid=$(echo "$stored_attrs" | awk '{print $1}')
@@ -274,7 +283,7 @@ restore_attributes() {
             
             chown "$uid:$gid" "$item" 2>/dev/null || true
             chmod "$mode" "$item" 2>/dev/null || true
-            [ -n "$stored_context" ] && chcon "$stored_context" "$item" 2>/dev/null || true
+            [ -n "$stored_context" ] && setfattr -n security.selinux -v "$stored_context" "$item" 2>/dev/null || true
         fi
 
         if [ "$QUIET" = false ]; then echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Restoring contexts: ${percentage}% (${processed}/${FILE_COUNT})${RESET}"; fi
