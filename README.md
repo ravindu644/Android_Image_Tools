@@ -5,7 +5,7 @@
 - It's like CRB Kitchen, but for Linux.
 
 
-**Compatibility:** Debian/Ubuntu only. Arch/Fedora distros have issues with Android SELinux labels causing bootloops.
+**Compatibility:** Debian/Ubuntu and Fedora-based distros.
 
 ## How to use ?
 
