@@ -376,6 +376,19 @@ else
         echo -e "\n${GREEN}${BOLD}[✓] Successfully mounted using FUSE${RESET}"
         MOUNT_SUCCESS=true
         MOUNT_METHOD="fuse"
+        
+        # Warn about SELinux context issues on FUSE mounts
+        if command -v getenforce >/dev/null 2>&1; then
+            selinux_status=$(getenforce 2>/dev/null)
+            if [ "$selinux_status" = "Enforcing" ] || [ "$selinux_status" = "Permissive" ]; then
+                echo -e "\n${RED}${BOLD}WARNING: FUSE mount detected on SELinux-enabled system.${RESET}"
+                echo -e "${RED}FUSE filesystems have limited SELinux context support.${RESET}"
+                echo -e "${RED}Extracted SELinux contexts may be incorrect or 'unlabeled_t'.${RESET}"
+                echo -e "${RED}Restoring bad contexts can cause bootloops or permission issues.${RESET}"
+                echo -e "${RED}Consider using kernel mounts for better context preservation.${RESET}"
+                echo -e "${RED}Proceed with caution!${RESET}\n"
+            fi
+        fi
     else
         echo -e "${RED}${BOLD}[✗] All mount attempts failed. Unable to proceed.${RESET}"
         exit 1
