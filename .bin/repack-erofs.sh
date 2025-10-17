@@ -391,7 +391,7 @@ create_ext4_image_quiet() {
         -O ^has_journal,^resize_inode,^64bit,^flex_bg,^metadata_csum "$output"
 
     mkdir -p "$mount_point"
-    mount -o loop,rw "$output" "$mount_point" 2>/dev/null
+    mount -o loop,rw,seclabel "$output" "$mount_point" 2>/dev/null
 }
 
 calculate_optimal_ext4_size() {
@@ -725,7 +725,7 @@ case $FS_CHOICE in
                 fi
                 dd if=/dev/zero of="$OUTPUT_IMG" bs="$ORIGINAL_BLOCK_SIZE" count="$ORIGINAL_BLOCK_COUNT" status=none
                 mkfs.ext4 -q -b "$ORIGINAL_BLOCK_SIZE" -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$features" "$OUTPUT_IMG"
-                mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
+                mount -o loop,rw,seclabel "$OUTPUT_IMG" "$MOUNT_POINT"
             fi
         fi
         

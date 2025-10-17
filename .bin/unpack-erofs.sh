@@ -364,7 +364,7 @@ MOUNT_METHOD=""
 
 # Try traditional mount first
 echo -e "${BLUE}Trying kernel mount...${RESET}"
-if mount -o loop "$MOUNT_IMAGE" "$MOUNT_DIR" 2>/dev/null; then
+if mount -o loop,seclabel "$MOUNT_IMAGE" "$MOUNT_DIR" 2>/dev/null; then
     echo -e "${GREEN}${BOLD}[✓] Successfully mounted using kernel driver${RESET}"
     MOUNT_SUCCESS=true
     MOUNT_METHOD="kernel"
