@@ -13,6 +13,9 @@ BLUE="\033[0;34m"
 BOLD="\033[1m"
 RESET="\033[0m"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP_DIR="$SCRIPT_DIR/.tmp"
+
 # Banner function
 print_banner() {
   echo -e "${BOLD}${GREEN}"
@@ -82,7 +85,7 @@ if [ -n "$OUTPUT_DIR_OVERRIDE" ]; then
 else
   EXTRACT_DIR="extracted_${PARTITION_NAME}"
 fi
-MOUNT_DIR="/tmp/${PARTITION_NAME}_mount"
+MOUNT_DIR="$TMP_DIR/${PARTITION_NAME}_mount"
 REPACK_INFO="${EXTRACT_DIR}/.repack_info"
 RAW_IMAGE=""
 FS_CONFIG_FILE="${REPACK_INFO}/fs-config.txt"
@@ -243,7 +246,7 @@ prepare_image_for_mount() {
     
     if is_sparse_image "$input"; then
         echo -e "${YELLOW}Detected sparse image format${RESET}"
-        RAW_IMAGE="${input%.img}_raw.img"
+        RAW_IMAGE="$TMP_DIR/${input%.img}_raw.img"
         echo -e "${BLUE}Converting to raw image as ${BOLD}$RAW_IMAGE${RESET}"
         if simg2img "$input" "$RAW_IMAGE" 2>/dev/null; then
             echo -e "${GREEN}Successfully converted sparse image${RESET}"

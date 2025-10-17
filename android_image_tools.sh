@@ -8,6 +8,7 @@ trap 'cleanup_and_exit' INT TERM EXIT
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 source "$SCRIPT_DIR/.bin/util-functions.sh" || { echo -e "${RED}Error: util-functions.sh not found${RESET}"; exit 1; }
+TMP_DIR="$SCRIPT_DIR/.tmp"
 UNPACK_SCRIPT_PATH="${SCRIPT_DIR}/.bin/unpack-erofs.sh"
 REPACK_SCRIPT_PATH="${SCRIPT_DIR}/.bin/repack-erofs.sh"
 SUPER_SCRIPT_PATH="${SCRIPT_DIR}/.bin/super-tools.sh"
@@ -30,7 +31,7 @@ print_usage() {
 
 sudo_cleanup_temp_dirs() {
     local temp_dirs
-    temp_dirs=$(find /tmp -mindepth 1 -maxdepth 1 \( -name "repack-*" -o -name "*_mount" -o -name "*_raw.img" -o -name "super_unpack_*" -o -name "ait_super_*" \) -print0 2>/dev/null)
+    temp_dirs=$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 \( -name "repack-*" -o -name "*_mount" -o -name "*_raw.img" -o -name "super_unpack_*" -o -name "ait_super_*" \) -print0 2>/dev/null)
     if [ -n "$temp_dirs" ]; then
         echo "$temp_dirs" | xargs -0 sudo rm -rf
     fi

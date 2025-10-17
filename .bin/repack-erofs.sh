@@ -50,6 +50,9 @@ BLUE="\033[0;34m"
 BOLD="\033[1m"
 RESET="\033[0m"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP_DIR="$SCRIPT_DIR/.tmp"
+
 # Banner function
 print_banner() {
   if [ "$NO_BANNER" = false ]; then
@@ -97,7 +100,7 @@ FS_CONFIG_FILE="${REPACK_INFO}/fs-config.txt"
 FILE_CONTEXTS_FILE="${REPACK_INFO}/file_contexts.txt"
 
 # Add temp directory definition and cleanup function
-TEMP_ROOT="/tmp/repack-erofs"
+TEMP_ROOT="$TMP_DIR/repack-erofs"
 WORK_DIR="${TEMP_ROOT}/${PARTITION_NAME}_work"
 MOUNT_POINT=""
 
@@ -296,7 +299,7 @@ verify_modifications() {
     echo -e "\n${BLUE}Verifying modified files...${RESET}"
     
     # Generate current checksums excluding .repack_info
-    local curr_sums="/tmp/current_checksums.txt"
+    local curr_sums="$TMP_DIR/current_checksums.txt"
     (cd "$src" && find . -type f -not -path "./.repack_info/*" -exec sha256sum {} \;) > "$curr_sums"
     
     echo -e "${BLUE}Analyzing changes...${RESET}"

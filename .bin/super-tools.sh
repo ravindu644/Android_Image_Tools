@@ -7,11 +7,11 @@ set -e
 
 # --- Global Settings & Color Codes ---
 RED="\033[0;31m"; GREEN="\033[0;32m"; YELLOW="\033[0;33m"; BLUE="\033[0;34m"; BOLD="\033[1m"; RESET="\033[0m"
-TMP_DIR="" # Will be set by the script
 
 # Locate the script's own directory to find the local bin folder.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 BIN_DIR="${SCRIPT_DIR}" # Modified by user for .bin structure
+TMP_DIR="$SCRIPT_DIR/.tmp"
 
 if [ -d "$BIN_DIR" ]; then
     export PATH="$BIN_DIR:$PATH"
@@ -120,7 +120,7 @@ run_unpack() {
         echo -e "${RED}Error: Input file not found: '$super_image'${RESET}"; exit 1
     fi
     
-    TMP_DIR=$(mktemp -d -t super_unpack_XXXXXX)
+    TMP_DIR=$(mktemp -d -p "$TMP_DIR" super_unpack_XXXXXX)
     
     local raw_super_image="${TMP_DIR}/super.raw.img"
     local config_file="${TMP_DIR}/repack_info.txt"
