@@ -1,9 +1,16 @@
 # Android Image Tools 🛠️
 
-A powerful, user-friendly Linux script for unpacking and repacking Android images with full filesystem support, SELinux context preservation, and seamless automation. Like CRB Kitchen, but native to Linux with cross-distro compatibility and advanced CI/CD features.
-
 [![GitHub Release](https://img.shields.io/github/v/release/ravindu644/Android_Image_Tools)](https://github.com/ravindu644/Android_Image_Tools/releases)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+A powerful, user-friendly Linux script for unpacking and repacking Android images with full filesystem support, SELinux context preservation, and seamless automation. Like CRB Kitchen, but native to Linux with cross-distro compatibility and advanced CI/CD features.
+
+<details>
+<summary><strong>Click here to preview the interface</strong></summary>
+
+![Android Image Tools Screenshot](.bin/screenshots/1.png)
+
+</details>
 
 ## ✨ What It Does
 
