@@ -801,6 +801,8 @@ run_super_repack_interactive() {
     local sparse_flag=""
     [ "$AIT_CHOICE_INDEX" -eq 1 ] && sparse_flag="--raw"
 
+    clear; print_banner
+
     echo -e "\n${RED}${BOLD}Starting full super repack. This will take a long time...${RESET}"
     trap '' INT
     set -e
