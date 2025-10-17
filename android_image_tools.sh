@@ -281,6 +281,64 @@ export_repack_config() {
     read -rp $'\nPress Enter to return to the summary...'
 }
 
+export_unpack_config() {
+    local input_image="$1" output_dir="$2"
+
+    mkdir -p "$SCRIPT_DIR/CONFIGS"
+    clear; print_banner
+
+    local image_name
+    image_name=$(basename "$input_image" .img)
+    local default_conf_name="${image_name}_unpack.conf"
+
+    read -rp "$(echo -e ${BLUE}"Enter filename for preset [${BOLD}${default_conf_name}${BLUE}]: "${RESET})" conf_filename
+    conf_filename=${conf_filename:-$default_conf_name}
+
+    local final_conf_path="$SCRIPT_DIR/CONFIGS/$conf_filename"
+    local full_input_path
+    full_input_path=$(realpath "$input_image")
+    local full_output_path
+    full_output_path=$(realpath "$output_dir")
+
+    {
+        echo "# --- Android Image Tools Unpack Configuration ---"
+        echo "ACTION=unpack"
+        echo "INPUT_IMAGE=$(basename "$full_input_path")"
+        echo "EXTRACT_DIR=$(basename "$full_output_path")"
+    } > "$final_conf_path"
+
+    echo -e "\n${GREEN}${BOLD}[✓] Settings successfully exported to '${final_conf_path}'.${RESET}"
+    read -rp $'\nPress Enter to return to the summary...'
+}
+
+export_super_unpack_config() {
+    local super_image="$1" project_name="$2"
+
+    mkdir -p "$SCRIPT_DIR/CONFIGS"
+    clear; print_banner
+
+    local image_name
+    image_name=$(basename "$super_image" .img)
+    local default_conf_name="${image_name}_${project_name}_unpack.conf"
+
+    read -rp "$(echo -e ${BLUE}"Enter filename for preset [${BOLD}${default_conf_name}${BLUE}]: "${RESET})" conf_filename
+    conf_filename=${conf_filename:-$default_conf_name}
+
+    local final_conf_path="$SCRIPT_DIR/CONFIGS/$conf_filename"
+    local full_input_path
+    full_input_path=$(realpath "$super_image")
+
+    {
+        echo "# --- Android Image Tools Super Unpack Configuration ---"
+        echo "ACTION=super_unpack"
+        echo "INPUT_IMAGE=$(basename "$full_input_path")"
+        echo "PROJECT_NAME=$project_name"
+    } > "$final_conf_path"
+
+    echo -e "\n${GREEN}${BOLD}[✓] Settings successfully exported to '${final_conf_path}'.${RESET}"
+    read -rp $'\nPress Enter to return to the summary...'
+}
+
 cleanup_workspace() {
     clear; print_banner
     
@@ -362,8 +420,12 @@ run_unpack_interactive() {
             3)
                 clear; print_banner
                 echo -e "\n${BOLD}Unpack Operation Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $input_image\n  - ${YELLOW}Output Directory:${RESET} $output_dir"
-                select_option "Proceed with this operation?" "Proceed" "Back" --no-clear
+                select_option "Proceed with this operation?" "Proceed" "Export selected settings" "Back" --no-clear
                 if [ "$AIT_CHOICE_INDEX" -eq 1 ]; then
+                    export_unpack_config "$input_image" "$output_dir"
+                    step=3
+                    continue
+                elif [ "$AIT_CHOICE_INDEX" -eq 2 ]; then
                     step=1
                     continue
                 fi
@@ -556,6 +618,18 @@ run_super_unpack_interactive() {
     if [ "$AIT_CHOICE_INDEX" -eq 0 ]; then
         rm -rf "$logical_dir"
         echo -e "\n${GREEN}[✓] Intermediate files removed.${RESET}"
+    fi
+
+    # Add export option for super unpacking
+    echo -e "\n${BOLD}Super Unpack Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $super_image\n  - ${YELLOW}Project Name:${RESET} $session_name\n  - ${YELLOW}Output Directory:${RESET} $project_dir"
+    select_option "What would you like to do?" "Continue" "Export selected settings" "Back" --no-clear
+
+    if [ "$AIT_CHOICE_INDEX" -eq 1 ]; then
+        export_super_unpack_config "$super_image" "$session_name"
+        echo -e "\n${BOLD}Super Unpack Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $super_image\n  - ${YELLOW}Project Name:${RESET} $session_name\n  - ${YELLOW}Output Directory:${RESET} $project_dir"
+        select_option "What would you like to do?" "Continue" "Export selected settings" "Back" --no-clear
+    elif [ "$AIT_CHOICE_INDEX" -eq 2 ]; then
+        return
     fi
 
     trap 'cleanup_and_exit' INT TERM EXIT

@@ -86,7 +86,15 @@ sudo ./android_image_tools.sh
 ```
 Creates a ready-to-use config file automatically.
 
-#### Method 2: Super Image Configuration
+#### Method 2: Export During Unpacking
+```bash
+sudo ./android_image_tools.sh
+# Navigate: Unpack an Android Image → Complete setup → "Export selected settings"
+# Or: Advanced Tools → Super Image Kitchen → Unpack a Super Image → "Export selected settings"
+```
+Creates reusable config files for automation workflows.
+
+#### Method 3: Super Image Configuration
 ```bash
 sudo ./android_image_tools.sh
 # Navigate: Advanced Tools → Super Image Kitchen → Finalize Project Configuration
