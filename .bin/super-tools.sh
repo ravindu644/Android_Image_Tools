@@ -17,7 +17,8 @@ fi
 # Locate the script's own directory to find the local bin folder.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 BIN_DIR="${SCRIPT_DIR}" # Modified by user for .bin structure
-TMP_DIR="$SCRIPT_DIR/.tmp"
+PROJECT_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd )"
+TMP_DIR="$PROJECT_ROOT/.tmp"
 
 if [ -d "$BIN_DIR" ]; then
     export PATH="$BIN_DIR:$PATH"

@@ -36,10 +36,8 @@ print_usage() {
 }
 
 sudo_cleanup_temp_dirs() {
-    local temp_dirs
-    temp_dirs=$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 \( -name "repack-*" -o -name "*_mount" -o -name "*_raw.img" -o -name "super_unpack_*" -o -name "ait_super_*" \) -print0 2>/dev/null)
-    if [ -n "$temp_dirs" ]; then
-        echo "$temp_dirs" | xargs -0 sudo rm -rf
+    if [ -d "$TMP_DIR" ]; then
+        sudo rm -rf "$TMP_DIR"
     fi
 }
 
@@ -57,7 +55,7 @@ cleanup_and_exit() {
 }
 
 create_workspace() {
-    local ALL_DIRS=("${WORKSPACE_DIRS[@]}" "CONFIGS")
+    local ALL_DIRS=("${WORKSPACE_DIRS[@]}" "CONFIGS" ".tmp")
     for dir in "${ALL_DIRS[@]}"; do
         mkdir -p "$SCRIPT_DIR/$dir"
         if [ -n "$SUDO_USER" ]; then
@@ -343,19 +341,10 @@ cleanup_workspace() {
     clear; print_banner
     
     local total_bytes=0
-    local dirs_to_scan=("${WORKSPACE_DIRS[@]}" "CONFIGS")
+    local dirs_to_scan=("${WORKSPACE_DIRS[@]}" "CONFIGS" ".tmp")
     local workspace_bytes
     workspace_bytes=$(du -sb "${dirs_to_scan[@]/#/$SCRIPT_DIR/}" 2>/dev/null | awk '{s+=$1} END {print s}')
     total_bytes=$((total_bytes + ${workspace_bytes:-0}))
-    
-    local temp_files_list
-    
-    temp_files_list=$(find /tmp -mindepth 1 -maxdepth 1 \( -name "repack-*" -o -name "*_mount" -o -name "*_raw.img" -o -name "super_unpack_*" -o -name "ait_super_*" \) 2>/dev/null)
-    if [ -n "$temp_files_list" ]; then
-        local temp_bytes
-        temp_bytes=$(echo "$temp_files_list" | xargs du -sb 2>/dev/null | awk '{s+=$1} END {print s}')
-        total_bytes=$((total_bytes + ${temp_bytes:-0}))
-    fi
     
     local total_size
     total_size=$(numfmt --to=iec-i --suffix=B --padding=7 "$total_bytes")
@@ -377,14 +366,6 @@ cleanup_workspace() {
             find "$SCRIPT_DIR/$dir" -mindepth 1 -not -name '.gitkeep' -exec rm -rf {} + 2>/dev/null || true
         fi
     done
-    
-    echo -e "\n${BLUE}Cleaning temporary system files...${RESET}"
-    if [ -n "$temp_files_list" ]; then
-        echo "$temp_files_list" | xargs sudo rm -rf
-        echo -e "  - Deleted temporary files."
-    else
-        echo -e "  - No temporary files found."
-    fi
     
     echo -e "\n${GREEN}${BOLD}[✓] Workspace and temporary files have been cleaned.${RESET}"
     read -rp $'\nPress Enter to return to the main menu...'
@@ -543,6 +524,16 @@ run_super_unpack_interactive() {
         echo -e "\n${RED}Error: Project name cannot be empty.${RESET}"; sleep 2; return
     fi
 
+    # Ask for config export right after project name
+    select_option "Would you like to export these settings to a config file for easy re-running?" "Yes" "No"
+
+    if [ "$AIT_CHOICE_INDEX" -eq 0 ]; then
+        export_super_unpack_config "$super_image" "$session_name"
+    fi
+
+    # Clear screen to remove config export prompt from output
+    clear; print_banner
+
     project_dir="$SCRIPT_DIR/SUPER_TOOLS/$session_name"
     metadata_dir="$project_dir/.metadata"
     logical_dir="$project_dir/logical_partitions"
@@ -553,24 +544,24 @@ run_super_unpack_interactive() {
     fi
 
     mkdir -p "$project_dir" "$metadata_dir" "$logical_dir" "$extracted_dir"
-    
-    echo -e "\n${RED}${BOLD}Starting full super unpack. DO NOT INTERRUPT...${RESET}"
+
+    echo -e "${RED}${BOLD}Starting full super unpack. DO NOT INTERRUPT...${RESET}"
     trap '' INT
     set -e
 
     # Step 1: Run the initial part of super-tools to get metadata and convert to raw.
     # This is quick and the output is useful, so we show it directly.
     bash "$SUPER_SCRIPT_PATH" unpack "$super_image" "$logical_dir" --no-banner
-    
+
     set +e # Disable exit on error for the loop
     local partition_list_file="${metadata_dir}/partition_list.txt"
     touch "$partition_list_file"
-    
+
     local partitions_to_unpack=()
     while IFS= read -r item; do
         partitions_to_unpack+=("$item")
     done < <(find "$logical_dir" -maxdepth 1 -type f -name '*.img' ! -name 'super.raw.img' -exec basename {} .img \;)
-    
+
     local total=${#partitions_to_unpack[@]}
     local current=0
     local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
@@ -580,7 +571,7 @@ run_super_unpack_interactive() {
     for part_name in "${partitions_to_unpack[@]}"; do
         current=$((current + 1))
         local spin=0
-        
+
         # Run the unpack in the background so we can show a spinner
         # We redirect output to /dev/null because we only care about success or failure.
         local quiet_flag=""
@@ -603,13 +594,13 @@ run_super_unpack_interactive() {
             echo "$part_name" >> "$partition_list_file"
         fi
     done
-    
+
     if [ "$all_successful" = false ]; then
         trap 'cleanup_and_exit' INT TERM EXIT
         read -rp $'\nPress Enter to return...'
         return
     fi
-    
+
     local logical_size
     logical_size=$(du -sh "$logical_dir" | awk '{print $1}')
     echo -e "\n${BLUE}The intermediate logical partitions (${logical_size}) can be removed to save space.${RESET}"
@@ -618,18 +609,6 @@ run_super_unpack_interactive() {
     if [ "$AIT_CHOICE_INDEX" -eq 0 ]; then
         rm -rf "$logical_dir"
         echo -e "\n${GREEN}[✓] Intermediate files removed.${RESET}"
-    fi
-
-    # Add export option for super unpacking
-    echo -e "\n${BOLD}Super Unpack Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $super_image\n  - ${YELLOW}Project Name:${RESET} $session_name\n  - ${YELLOW}Output Directory:${RESET} $project_dir"
-    select_option "What would you like to do?" "Continue" "Export selected settings" "Back" --no-clear
-
-    if [ "$AIT_CHOICE_INDEX" -eq 1 ]; then
-        export_super_unpack_config "$super_image" "$session_name"
-        echo -e "\n${BOLD}Super Unpack Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $super_image\n  - ${YELLOW}Project Name:${RESET} $session_name\n  - ${YELLOW}Output Directory:${RESET} $project_dir"
-        select_option "What would you like to do?" "Continue" "Export selected settings" "Back" --no-clear
-    elif [ "$AIT_CHOICE_INDEX" -eq 2 ]; then
-        return
     fi
 
     trap 'cleanup_and_exit' INT TERM EXIT
@@ -786,7 +765,7 @@ run_super_create_config_interactive() {
     done
     } > "$final_config_file"
 
-    echo -e "\n${GREEN}${BOLD}[✓] Universal repack configuration saved to:${RESET}\n${final_config_file}"
+    echo -e "\n${GREEN}${BOLD}[✓] Universal repack configuration saved to: ${RESET}${final_config_file}"
     read -rp $'\nPress Enter to return...'
 }
 
