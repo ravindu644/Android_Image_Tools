@@ -732,6 +732,13 @@ run_super_create_config_interactive() {
     if [ "$AIT_CHOICE_INDEX" -eq 0 ]; then
         enable_verbose_logs="true"
     fi
+
+    select_option "Create a flashable sparse image?" "Yes (Recommended)" "No (Raw Image)"
+
+    local create_sparse_image="true"
+    if [ "$AIT_CHOICE_INDEX" -eq 1 ]; then
+        create_sparse_image="false"
+    fi
     
     {
         echo "# --- Universal Repack Configuration ---"
@@ -741,6 +748,7 @@ run_super_create_config_interactive() {
         echo ""
         echo "# --- Repack Behavior Settings ---"
         echo "ENABLE_VERBOSE_LOGS=${enable_verbose_logs}"
+        echo "CREATE_SPARSE_IMAGE=${create_sparse_image}"
         echo ""
         echo "# --- Super Partition Metadata ---"
         grep -v -E '^(#|$)' "${metadata_dir}/super_repack_info.txt"
@@ -797,9 +805,8 @@ run_super_repack_interactive() {
     output_image="$(echo "$output_image" | tr -d "\"'")"
     output_image=${output_image:-$default_output_image}
     
-    select_option "Create a flashable sparse image?" "Yes (Recommended)" "No (Raw Image)"
     local sparse_flag=""
-    [ "$AIT_CHOICE_INDEX" -eq 1 ] && sparse_flag="--raw"
+    [ "${CREATE_SPARSE_IMAGE:-true}" = "false" ] && sparse_flag="--raw"
 
     clear; print_banner
 
