@@ -72,6 +72,12 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
+# Save original SELinux status and set to permissive for proper context extraction
+ORIGINAL_SELINUX=$(getenforce 2>/dev/null || echo "Disabled")
+if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
+    setenforce 0
+fi
+
 # Check if an image file was provided in the arguments
 if [ -z "$IMAGE_FILE" ]; then
   echo -e "${YELLOW}Usage: $0 <image_file> [output_directory]${RESET}"
@@ -153,6 +159,11 @@ cleanup() {
       sleep 1
       rm -rf "$MOUNT_DIR" 2>/dev/null || true
     fi
+  fi
+  
+  # Restore original SELinux status
+  if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
+    setenforce 1 2>/dev/null || true
   fi
   
   echo -e "${GREEN}Cleanup completed.${RESET}"

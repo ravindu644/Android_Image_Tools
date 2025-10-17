@@ -8,6 +8,12 @@ set -e
 # --- Global Settings & Color Codes ---
 RED="\033[0;31m"; GREEN="\033[0;32m"; YELLOW="\033[0;33m"; BLUE="\033[0;34m"; BOLD="\033[1m"; RESET="\033[0m"
 
+# Save original SELinux status and set to permissive for proper operations
+ORIGINAL_SELINUX=$(getenforce 2>/dev/null || echo "Disabled")
+if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
+    setenforce 0
+fi
+
 # Locate the script's own directory to find the local bin folder.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 BIN_DIR="${SCRIPT_DIR}" # Modified by user for .bin structure
@@ -21,6 +27,11 @@ fi
 cleanup() {
     if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
         rm -rf "$TMP_DIR"
+    fi
+    
+    # Restore original SELinux status
+    if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
+        setenforce 1 2>/dev/null || true
     fi
 }
 

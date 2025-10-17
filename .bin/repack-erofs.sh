@@ -72,6 +72,12 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
+# Save original SELinux status and set to permissive for proper context restoration
+ORIGINAL_SELINUX=$(getenforce 2>/dev/null || echo "Disabled")
+if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
+    setenforce 0
+fi
+
 # Check if mkfs.erofs is installed
 if ! command -v mkfs.erofs &> /dev/null; then
   echo -e "${RED}mkfs.erofs command not found. Please install erofs-utils package.${RESET}"
@@ -118,6 +124,12 @@ cleanup() {
     # Then remove temporary files        
     [ -d "$TEMP_ROOT" ] && rm -rf "$TEMP_ROOT"
     [ -f "$OUTPUT_IMG.tmp" ] && rm -f "$OUTPUT_IMG.tmp"
+    
+    # Restore original SELinux status
+    if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
+        setenforce 1 2>/dev/null || true
+    fi
+    
     if [ "$NO_BANNER" = false ]; then
         echo -e "${GREEN}Cleanup completed.${RESET}"
     fi

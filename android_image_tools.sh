@@ -9,6 +9,12 @@ trap 'cleanup_and_exit' INT TERM EXIT
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 source "$SCRIPT_DIR/.bin/util-functions.sh" || { echo -e "${RED}Error: util-functions.sh not found${RESET}"; exit 1; }
 TMP_DIR="$SCRIPT_DIR/.tmp"
+
+# Save original SELinux status and set to permissive for proper operations
+ORIGINAL_SELINUX=$(getenforce 2>/dev/null || echo "Disabled")
+if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
+    setenforce 0
+fi
 UNPACK_SCRIPT_PATH="${SCRIPT_DIR}/.bin/unpack-erofs.sh"
 REPACK_SCRIPT_PATH="${SCRIPT_DIR}/.bin/repack-erofs.sh"
 SUPER_SCRIPT_PATH="${SCRIPT_DIR}/.bin/super-tools.sh"
@@ -40,6 +46,12 @@ sudo_cleanup_temp_dirs() {
 cleanup_and_exit() {
     tput cnorm
     sudo_cleanup_temp_dirs
+    
+    # Restore original SELinux status
+    if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
+        setenforce 1 2>/dev/null || true
+    fi
+    
     echo -e "\n${YELLOW}Exiting Android Image Tools.${RESET}"
     exit 130
 }
