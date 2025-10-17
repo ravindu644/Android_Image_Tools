@@ -316,7 +316,7 @@ cleanup_workspace() {
     for dir in "${dirs_to_scan[@]}"; do
         if [ -d "$SCRIPT_DIR/$dir" ]; then
             echo -e "  - Deleting contents of ${BOLD}$SCRIPT_DIR/$dir${RESET}"
-            find "$SCRIPT_DIR/$dir" -mindepth 1 -not -name '.gitkeep' -delete
+            find "$SCRIPT_DIR/$dir" -mindepth 1 -not -name '.gitkeep' -exec rm -rf {} + 2>/dev/null || true
         fi
     done
     
