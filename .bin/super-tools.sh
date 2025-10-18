@@ -7,11 +7,18 @@ set -e
 
 # --- Global Settings & Color Codes ---
 RED="\033[0;31m"; GREEN="\033[0;32m"; YELLOW="\033[0;33m"; BLUE="\033[0;34m"; BOLD="\033[1m"; RESET="\033[0m"
-TMP_DIR="" # Will be set by the script
+
+# Save original SELinux status and set to permissive for proper operations
+ORIGINAL_SELINUX=$(getenforce 2>/dev/null || echo "Disabled")
+if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
+    setenforce 0
+fi
 
 # Locate the script's own directory to find the local bin folder.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 BIN_DIR="${SCRIPT_DIR}" # Modified by user for .bin structure
+PROJECT_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd )"
+TMP_DIR="$PROJECT_ROOT/.tmp"
 
 if [ -d "$BIN_DIR" ]; then
     export PATH="$BIN_DIR:$PATH"
@@ -21,6 +28,11 @@ fi
 cleanup() {
     if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
         rm -rf "$TMP_DIR"
+    fi
+    
+    # Restore original SELinux status
+    if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
+        setenforce 1 2>/dev/null || true
     fi
 }
 
@@ -120,7 +132,7 @@ run_unpack() {
         echo -e "${RED}Error: Input file not found: '$super_image'${RESET}"; exit 1
     fi
     
-    TMP_DIR=$(mktemp -d -t super_unpack_XXXXXX)
+    TMP_DIR=$(mktemp -d -p "$TMP_DIR" super_unpack_XXXXXX)
     
     local raw_super_image="${TMP_DIR}/super.raw.img"
     local config_file="${TMP_DIR}/repack_info.txt"

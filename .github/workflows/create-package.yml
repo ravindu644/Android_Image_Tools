@@ -46,5 +46,4 @@ jobs:
           body: |
             Automated release for version ${{ github.event.inputs.version }}.
 
-            Only supported on Ubuntu/Debian based systems.
-
+            Supported on Ubuntu/Debian and Fedora-based systems.

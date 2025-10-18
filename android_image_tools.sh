@@ -7,23 +7,23 @@
 trap 'cleanup_and_exit' INT TERM EXIT
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+source "$SCRIPT_DIR/.bin/util-functions.sh" || { echo -e "${RED}Error: util-functions.sh not found${RESET}"; exit 1; }
+TMP_DIR="$SCRIPT_DIR/.tmp"
+
+# Save original SELinux status and set to permissive for proper operations
+ORIGINAL_SELINUX=$(getenforce 2>/dev/null || echo "Disabled")
+if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
+    setenforce 0
+fi
 UNPACK_SCRIPT_PATH="${SCRIPT_DIR}/.bin/unpack-erofs.sh"
 REPACK_SCRIPT_PATH="${SCRIPT_DIR}/.bin/repack-erofs.sh"
 SUPER_SCRIPT_PATH="${SCRIPT_DIR}/.bin/super-tools.sh"
 
 WORKSPACE_DIRS=("INPUT_IMAGES" "EXTRACTED_IMAGES" "REPACKED_IMAGES" "SUPER_TOOLS")
 
-RED="\033[0;31m"; GREEN="\033[0;32m"; YELLOW="\033[0;33m"; BLUE="\033[0;34m"; BOLD="\033[1m"; RESET="\033[0m"
 AIT_CHOICE_INDEX=0; AIT_SELECTED_ITEM=""
 
 # --- Core Functions ---
-print_banner() {
-    echo -e "${BOLD}${GREEN}"
-    echo "┌──────────────────────────────────────────────────┐"
-    echo "│     Android Image Tools - by @ravindu644         │"
-    echo "└──────────────────────────────────────────────────┘"
-    echo -e "${RESET}"
-}
 
 print_usage() {
     if [ -n "$1" ]; then echo -e "\n${RED}${BOLD}Error: Invalid argument '$1'${RESET}"; fi
@@ -36,108 +36,26 @@ print_usage() {
 }
 
 sudo_cleanup_temp_dirs() {
-    local temp_dirs
-    temp_dirs=$(find /tmp -mindepth 1 -maxdepth 1 \( -name "repack-*" -o -name "*_mount" -o -name "*_raw.img" -o -name "super_unpack_*" -o -name "ait_super_*" \) -print0 2>/dev/null)
-    if [ -n "$temp_dirs" ]; then
-        echo "$temp_dirs" | xargs -0 sudo rm -rf
+    if [ -d "$TMP_DIR" ]; then
+        sudo rm -rf "$TMP_DIR"
     fi
 }
 
 cleanup_and_exit() {
     tput cnorm
     sudo_cleanup_temp_dirs
+    
+    # Restore original SELinux status
+    if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
+        setenforce 1 2>/dev/null || true
+    fi
+    
     echo -e "\n${YELLOW}Exiting Android Image Tools.${RESET}"
     exit 130
 }
 
-check_distro() {
-    if ! command -v dpkg &>/dev/null || ! command -v apt &>/dev/null; then
-        echo -e "\n${RED}${BOLD}Error: Unsupported Operating System Detected.${RESET}"
-        echo -e "${YELLOW}This script is designed specifically for Debian-based distributions (like Ubuntu)${RESET}"
-        echo -e "${YELLOW}which use 'apt' and 'dpkg' for package management.${RESET}"
-        echo -e "\nThis is to ensure proper handling of SELinux contexts, which can be inconsistent"
-        echo -e "on other distributions (e.g., Arch, Fedora), leading to repacking errors."
-        exit 1
-    fi
-}
-
-check_dependencies() {
-    local missing_pkgs=()
-    local erofs_utils_missing=false
-    # Added e2fsprogs and fuse to the required packages
-    local REQUIRED_PACKAGES=("android-sdk-libsparse-utils" "build-essential" "automake" "autoconf" "libtool" "pkg-config" "git" "fuse3" "e2fsprogs" "pv" "liblz4-dev" "uuid-dev" "libfuse3-dev" "fuse3" "f2fs-tools" "fuse2fs" "attr" "zlib1g-dev")
-
-    
-    for pkg in "${REQUIRED_PACKAGES[@]}"; do
-        if ! dpkg -s "$pkg" &> /dev/null; then
-            missing_pkgs+=("$pkg")
-        fi
-    done
-    
-    # Check for erofs-utils with FUSE support
-    if ! command -v mkfs.erofs &>/dev/null || ! command -v erofsfuse &>/dev/null; then
-        erofs_utils_missing=true
-    fi
-    
-    if [ ${#missing_pkgs[@]} -eq 0 ] && [ "$erofs_utils_missing" = false ]; then
-        return 0 # All dependencies are present, exit silently
-    fi
-    
-    # If we reach here, some dependencies are missing.
-    clear
-    print_banner
-    echo -e "\n${RED}${BOLD}Warning: Missing required dependencies.${RESET}"
-    
-    if [ ${#missing_pkgs[@]} -gt 0 ]; then
-        echo -e "\n${YELLOW}The following packages are missing:${RESET}"
-        echo "  - ${missing_pkgs[*]}"
-    fi
-
-    if [ "$erofs_utils_missing" = true ]; then
-        echo -e "\n${YELLOW}The 'erofs-utils' build tools are also missing.${RESET}"
-    fi
-
-    read -rp "$(echo -e "\n${BLUE}Do you want to attempt automatic installation? (y/N): ${RESET}")" choice
-    
-    if [[ "$choice" =~ ^[Yy]$ ]]; then
-        echo -e "\n${BLUE}Starting automatic installation...${RESET}"
-        set -e
-        
-        if [ ${#missing_pkgs[@]} -gt 0 ]; then
-            local unique_pkgs=$(echo "${missing_pkgs[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' ')
-            echo -e "\n${BLUE}Updating package lists...${RESET}"
-            sudo apt update
-            echo -e "\n${BLUE}Installing required packages: $unique_pkgs${RESET}"
-            sudo apt install -y $unique_pkgs
-        fi
-
-        if [ "$erofs_utils_missing" = true ]; then
-            echo -e "\n${BLUE}Cloning and compiling 'erofs-utils'...${RESET}"
-            local erofs_tmp_dir
-            erofs_tmp_dir=$(mktemp -d)
-            git clone https://github.com/erofs/erofs-utils.git "$erofs_tmp_dir"
-            cd "$erofs_tmp_dir"
-            ./autogen.sh
-            ./configure --enable-fuse
-            make
-            sudo make install
-            cd "$SCRIPT_DIR"
-            rm -rf "$erofs_tmp_dir"
-            echo -e "${GREEN}'erofs-utils' installed successfully.${RESET}"
-        fi
-        
-        set +e
-        echo -e "\n${GREEN}${BOLD}[✓] All dependencies should now be installed.${RESET}"
-        read -rp "Press Enter to continue..."
-    else
-        echo -e "\n${YELLOW}Automatic installation declined.${RESET}"
-        echo -e "Please install the dependencies manually and re-run the script."
-        exit 1
-    fi
-}
-
 create_workspace() {
-    local ALL_DIRS=("${WORKSPACE_DIRS[@]}" "CONFIGS")
+    local ALL_DIRS=("${WORKSPACE_DIRS[@]}" "CONFIGS" ".tmp")
     for dir in "${ALL_DIRS[@]}"; do
         mkdir -p "$SCRIPT_DIR/$dir"
         if [ -n "$SUDO_USER" ]; then
@@ -361,23 +279,72 @@ export_repack_config() {
     read -rp $'\nPress Enter to return to the summary...'
 }
 
+export_unpack_config() {
+    local input_image="$1" output_dir="$2"
+
+    mkdir -p "$SCRIPT_DIR/CONFIGS"
+    clear; print_banner
+
+    local image_name
+    image_name=$(basename "$input_image" .img)
+    local default_conf_name="${image_name}_unpack.conf"
+
+    read -rp "$(echo -e ${BLUE}"Enter filename for preset [${BOLD}${default_conf_name}${BLUE}]: "${RESET})" conf_filename
+    conf_filename=${conf_filename:-$default_conf_name}
+
+    local final_conf_path="$SCRIPT_DIR/CONFIGS/$conf_filename"
+    local full_input_path
+    full_input_path=$(realpath "$input_image")
+    local full_output_path
+    full_output_path=$(realpath "$output_dir")
+
+    {
+        echo "# --- Android Image Tools Unpack Configuration ---"
+        echo "ACTION=unpack"
+        echo "INPUT_IMAGE=$(basename "$full_input_path")"
+        echo "EXTRACT_DIR=$(basename "$full_output_path")"
+    } > "$final_conf_path"
+
+    echo -e "\n${GREEN}${BOLD}[✓] Settings successfully exported to '${final_conf_path}'.${RESET}"
+    read -rp $'\nPress Enter to return to the summary...'
+}
+
+export_super_unpack_config() {
+    local super_image="$1" project_name="$2"
+
+    mkdir -p "$SCRIPT_DIR/CONFIGS"
+    clear; print_banner
+
+    local image_name
+    image_name=$(basename "$super_image" .img)
+    local default_conf_name="${image_name}_${project_name}_unpack.conf"
+
+    read -rp "$(echo -e ${BLUE}"Enter filename for preset [${BOLD}${default_conf_name}${BLUE}]: "${RESET})" conf_filename
+    conf_filename=${conf_filename:-$default_conf_name}
+
+    local final_conf_path="$SCRIPT_DIR/CONFIGS/$conf_filename"
+    local full_input_path
+    full_input_path=$(realpath "$super_image")
+
+    {
+        echo "# --- Android Image Tools Super Unpack Configuration ---"
+        echo "ACTION=super_unpack"
+        echo "INPUT_IMAGE=$(basename "$full_input_path")"
+        echo "PROJECT_NAME=$project_name"
+    } > "$final_conf_path"
+
+    echo -e "\n${GREEN}${BOLD}[✓] Settings successfully exported to '${final_conf_path}'.${RESET}"
+    read -rp $'\nPress Enter to return to the summary...'
+}
+
 cleanup_workspace() {
     clear; print_banner
     
     local total_bytes=0
-    local dirs_to_scan=("${WORKSPACE_DIRS[@]}" "CONFIGS")
+    local dirs_to_scan=("${WORKSPACE_DIRS[@]}" "CONFIGS" ".tmp")
     local workspace_bytes
     workspace_bytes=$(du -sb "${dirs_to_scan[@]/#/$SCRIPT_DIR/}" 2>/dev/null | awk '{s+=$1} END {print s}')
     total_bytes=$((total_bytes + ${workspace_bytes:-0}))
-    
-    local temp_files_list
-    
-    temp_files_list=$(find /tmp -mindepth 1 -maxdepth 1 \( -name "repack-*" -o -name "*_mount" -o -name "*_raw.img" -o -name "super_unpack_*" -o -name "ait_super_*" \) 2>/dev/null)
-    if [ -n "$temp_files_list" ]; then
-        local temp_bytes
-        temp_bytes=$(echo "$temp_files_list" | xargs du -sb 2>/dev/null | awk '{s+=$1} END {print s}')
-        total_bytes=$((total_bytes + ${temp_bytes:-0}))
-    fi
     
     local total_size
     total_size=$(numfmt --to=iec-i --suffix=B --padding=7 "$total_bytes")
@@ -396,17 +363,9 @@ cleanup_workspace() {
     for dir in "${dirs_to_scan[@]}"; do
         if [ -d "$SCRIPT_DIR/$dir" ]; then
             echo -e "  - Deleting contents of ${BOLD}$SCRIPT_DIR/$dir${RESET}"
-            find "$SCRIPT_DIR/$dir" -mindepth 1 -not -name '.gitkeep' -delete
+            find "$SCRIPT_DIR/$dir" -mindepth 1 -not -name '.gitkeep' -exec rm -rf {} + 2>/dev/null || true
         fi
     done
-    
-    echo -e "\n${BLUE}Cleaning temporary system files...${RESET}"
-    if [ -n "$temp_files_list" ]; then
-        echo "$temp_files_list" | xargs sudo rm -rf
-        echo -e "  - Deleted temporary files."
-    else
-        echo -e "  - No temporary files found."
-    fi
     
     echo -e "\n${GREEN}${BOLD}[✓] Workspace and temporary files have been cleaned.${RESET}"
     read -rp $'\nPress Enter to return to the main menu...'
@@ -442,8 +401,12 @@ run_unpack_interactive() {
             3)
                 clear; print_banner
                 echo -e "\n${BOLD}Unpack Operation Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $input_image\n  - ${YELLOW}Output Directory:${RESET} $output_dir"
-                select_option "Proceed with this operation?" "Proceed" "Back" --no-clear
+                select_option "Proceed with this operation?" "Proceed" "Export selected settings" "Back" --no-clear
                 if [ "$AIT_CHOICE_INDEX" -eq 1 ]; then
+                    export_unpack_config "$input_image" "$output_dir"
+                    step=3
+                    continue
+                elif [ "$AIT_CHOICE_INDEX" -eq 2 ]; then
                     step=1
                     continue
                 fi
@@ -561,6 +524,16 @@ run_super_unpack_interactive() {
         echo -e "\n${RED}Error: Project name cannot be empty.${RESET}"; sleep 2; return
     fi
 
+    # Ask for config export right after project name
+    select_option "Would you like to export these settings to a config file for easy re-running?" "Yes" "No"
+
+    if [ "$AIT_CHOICE_INDEX" -eq 0 ]; then
+        export_super_unpack_config "$super_image" "$session_name"
+    fi
+
+    # Clear screen to remove config export prompt from output
+    clear; print_banner
+
     project_dir="$SCRIPT_DIR/SUPER_TOOLS/$session_name"
     metadata_dir="$project_dir/.metadata"
     logical_dir="$project_dir/logical_partitions"
@@ -571,24 +544,24 @@ run_super_unpack_interactive() {
     fi
 
     mkdir -p "$project_dir" "$metadata_dir" "$logical_dir" "$extracted_dir"
-    
-    echo -e "\n${RED}${BOLD}Starting full super unpack. DO NOT INTERRUPT...${RESET}"
+
+    echo -e "${RED}${BOLD}Starting full super unpack. DO NOT INTERRUPT...${RESET}"
     trap '' INT
     set -e
 
     # Step 1: Run the initial part of super-tools to get metadata and convert to raw.
     # This is quick and the output is useful, so we show it directly.
     bash "$SUPER_SCRIPT_PATH" unpack "$super_image" "$logical_dir" --no-banner
-    
+
     set +e # Disable exit on error for the loop
     local partition_list_file="${metadata_dir}/partition_list.txt"
     touch "$partition_list_file"
-    
+
     local partitions_to_unpack=()
     while IFS= read -r item; do
         partitions_to_unpack+=("$item")
     done < <(find "$logical_dir" -maxdepth 1 -type f -name '*.img' ! -name 'super.raw.img' -exec basename {} .img \;)
-    
+
     local total=${#partitions_to_unpack[@]}
     local current=0
     local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
@@ -598,7 +571,7 @@ run_super_unpack_interactive() {
     for part_name in "${partitions_to_unpack[@]}"; do
         current=$((current + 1))
         local spin=0
-        
+
         # Run the unpack in the background so we can show a spinner
         # We redirect output to /dev/null because we only care about success or failure.
         local quiet_flag=""
@@ -621,13 +594,13 @@ run_super_unpack_interactive() {
             echo "$part_name" >> "$partition_list_file"
         fi
     done
-    
+
     if [ "$all_successful" = false ]; then
         trap 'cleanup_and_exit' INT TERM EXIT
         read -rp $'\nPress Enter to return...'
         return
     fi
-    
+
     local logical_size
     logical_size=$(du -sh "$logical_dir" | awk '{print $1}')
     echo -e "\n${BLUE}The intermediate logical partitions (${logical_size}) can be removed to save space.${RESET}"
@@ -759,6 +732,13 @@ run_super_create_config_interactive() {
     if [ "$AIT_CHOICE_INDEX" -eq 0 ]; then
         enable_verbose_logs="true"
     fi
+
+    select_option "Create a flashable sparse image?" "Yes (Recommended)" "No (Raw Image)"
+
+    local create_sparse_image="true"
+    if [ "$AIT_CHOICE_INDEX" -eq 1 ]; then
+        create_sparse_image="false"
+    fi
     
     {
         echo "# --- Universal Repack Configuration ---"
@@ -768,6 +748,7 @@ run_super_create_config_interactive() {
         echo ""
         echo "# --- Repack Behavior Settings ---"
         echo "ENABLE_VERBOSE_LOGS=${enable_verbose_logs}"
+        echo "CREATE_SPARSE_IMAGE=${create_sparse_image}"
         echo ""
         echo "# --- Super Partition Metadata ---"
         grep -v -E '^(#|$)' "${metadata_dir}/super_repack_info.txt"
@@ -792,7 +773,7 @@ run_super_create_config_interactive() {
     done
     } > "$final_config_file"
 
-    echo -e "\n${GREEN}${BOLD}[✓] Universal repack configuration saved to:${RESET}\n${final_config_file}"
+    echo -e "\n${GREEN}${BOLD}[✓] Universal repack configuration saved to: ${RESET}${final_config_file}"
     read -rp $'\nPress Enter to return...'
 }
 
@@ -824,9 +805,10 @@ run_super_repack_interactive() {
     output_image="$(echo "$output_image" | tr -d "\"'")"
     output_image=${output_image:-$default_output_image}
     
-    select_option "Create a flashable sparse image?" "Yes (Recommended)" "No (Raw Image)"
     local sparse_flag=""
-    [ "$AIT_CHOICE_INDEX" -eq 1 ] && sparse_flag="--raw"
+    [ "${CREATE_SPARSE_IMAGE:-true}" = "false" ] && sparse_flag="--raw"
+
+    clear; print_banner
 
     echo -e "\n${RED}${BOLD}Starting full super repack. This will take a long time...${RESET}"
     trap '' INT
@@ -1118,7 +1100,7 @@ run_non_interactive() {
 }
 
 # --- Main Execution Logic ---
-check_distro
+detect_os
 if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}This script requires root privileges. Please run with sudo.${RESET}"; exit 1
 fi

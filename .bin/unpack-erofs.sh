@@ -13,6 +13,9 @@ BLUE="\033[0;34m"
 BOLD="\033[1m"
 RESET="\033[0m"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP_DIR="$SCRIPT_DIR/.tmp"
+
 # Banner function
 print_banner() {
   echo -e "${BOLD}${GREEN}"
@@ -69,6 +72,12 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
+# Save original SELinux status and set to permissive for proper context extraction
+ORIGINAL_SELINUX=$(getenforce 2>/dev/null || echo "Disabled")
+if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
+    setenforce 0
+fi
+
 # Check if an image file was provided in the arguments
 if [ -z "$IMAGE_FILE" ]; then
   echo -e "${YELLOW}Usage: $0 <image_file> [output_directory]${RESET}"
@@ -82,7 +91,7 @@ if [ -n "$OUTPUT_DIR_OVERRIDE" ]; then
 else
   EXTRACT_DIR="extracted_${PARTITION_NAME}"
 fi
-MOUNT_DIR="/tmp/${PARTITION_NAME}_mount"
+MOUNT_DIR="$TMP_DIR/${PARTITION_NAME}_mount"
 REPACK_INFO="${EXTRACT_DIR}/.repack_info"
 RAW_IMAGE=""
 FS_CONFIG_FILE="${REPACK_INFO}/fs-config.txt"
@@ -150,6 +159,11 @@ cleanup() {
       sleep 1
       rm -rf "$MOUNT_DIR" 2>/dev/null || true
     fi
+  fi
+  
+  # Restore original SELinux status
+  if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
+    setenforce 1 2>/dev/null || true
   fi
   
   echo -e "${GREEN}Cleanup completed.${RESET}"
@@ -243,7 +257,7 @@ prepare_image_for_mount() {
     
     if is_sparse_image "$input"; then
         echo -e "${YELLOW}Detected sparse image format${RESET}"
-        RAW_IMAGE="${input%.img}_raw.img"
+        RAW_IMAGE="$TMP_DIR/${input%.img}_raw.img"
         echo -e "${BLUE}Converting to raw image as ${BOLD}$RAW_IMAGE${RESET}"
         if simg2img "$input" "$RAW_IMAGE" 2>/dev/null; then
             echo -e "${GREEN}Successfully converted sparse image${RESET}"
@@ -361,7 +375,7 @@ MOUNT_METHOD=""
 
 # Try traditional mount first
 echo -e "${BLUE}Trying kernel mount...${RESET}"
-if mount -o loop "$MOUNT_IMAGE" "$MOUNT_DIR" 2>/dev/null; then
+if mount -o loop,seclabel "$MOUNT_IMAGE" "$MOUNT_DIR" 2>/dev/null; then
     echo -e "${GREEN}${BOLD}[✓] Successfully mounted using kernel driver${RESET}"
     MOUNT_SUCCESS=true
     MOUNT_METHOD="kernel"
@@ -373,6 +387,19 @@ else
         echo -e "\n${GREEN}${BOLD}[✓] Successfully mounted using FUSE${RESET}"
         MOUNT_SUCCESS=true
         MOUNT_METHOD="fuse"
+        
+        # Warn about SELinux context issues on FUSE mounts
+        if command -v getenforce >/dev/null 2>&1; then
+            selinux_status=$(getenforce 2>/dev/null)
+            if [ "$selinux_status" = "Enforcing" ] || [ "$selinux_status" = "Permissive" ]; then
+                echo -e "\n${RED}${BOLD}WARNING: FUSE mount detected on SELinux-enabled system.${RESET}"
+                echo -e "${RED}FUSE filesystems have limited SELinux context support.${RESET}"
+                echo -e "${RED}Extracted SELinux contexts may be incorrect or 'unlabeled_t'.${RESET}"
+                echo -e "${RED}Restoring bad contexts can cause bootloops or permission issues.${RESET}"
+                echo -e "${RED}Consider using kernel mounts for better context preservation.${RESET}"
+                echo -e "${RED}Proceed with caution!${RESET}\n"
+            fi
+        fi
     else
         echo -e "${RED}${BOLD}[✗] All mount attempts failed. Unable to proceed.${RESET}"
         exit 1
