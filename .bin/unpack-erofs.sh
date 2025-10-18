@@ -456,8 +456,27 @@ find "$MOUNT_DIR" -mindepth 1 -print0 | while IFS= read -r -d $'\0' item; do
         # '|| true' prevents 'set -e' from exiting on broken symlinks or permission errors.
         target=$(readlink "$item" || true)
         stats=$(stat -c "%u %g %a" "$item" 2>/dev/null || true)
-        # Using getfattr for SELinux context extraction.
-        context=$(getfattr -m - -d "$item" 2>/dev/null | grep '^security\.selinux=' | cut -d'"' -f2 || echo "")
+        # Using getfattr for SELinux context extraction with robust parsing.
+        # Try multiple approaches to get symlink context
+        context=""
+
+        # Method 1: Try getfattr -h (recommended for symlinks)
+        if context_output=$(getfattr -h -n security.selinux "$item" 2>/dev/null); then
+            context=$(echo "$context_output" | grep '^# file: ' -A1 | tail -n1 | sed 's/^security\.selinux=//' | tr -d '"')
+        fi
+
+        # Method 2: Fallback to getfattr -d if method 1 failed
+        if [ -z "$context" ] && context_output=$(getfattr -d -n security.selinux "$item" 2>/dev/null); then
+            context=$(echo "$context_output" | grep '^# file: ' -A1 | tail -n1 | sed 's/^security\.selinux=//' | tr -d '"')
+        fi
+
+        # Method 3: Last resort - try getfattr with -m pattern matching
+        if [ -z "$context" ]; then
+            context=$(getfattr -m - -h "$item" 2>/dev/null | grep '^security\.selinux=' | head -n1 | cut -d'"' -f2 || echo "")
+        fi
+
+        # Clean up the context (remove any remaining quotes or spaces)
+        context=$(echo "$context" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
 
         # Only write to the info file if target and stats were retrieved.
         if [ -n "$target" ] && [ -n "$stats" ]; then
@@ -466,7 +485,26 @@ find "$MOUNT_DIR" -mindepth 1 -print0 | while IFS= read -r -d $'\0' item; do
     else
         # Handle regular files and directories.
         stats=$(stat -c "%u %g %a" "$item" 2>/dev/null || true)
-        context=$(getfattr -m - -d "$item" 2>/dev/null | grep '^security\.selinux=' | cut -d'"' -f2 || echo "")
+        # Using getfattr for SELinux context extraction with robust parsing.
+        context=""
+
+        # Method 1: Try getfattr -n security.selinux (direct attribute access)
+        if context_output=$(getfattr -n security.selinux "$item" 2>/dev/null); then
+            context=$(echo "$context_output" | grep '^# file: ' -A1 | tail -n1 | sed 's/^security\.selinux=//' | tr -d '"')
+        fi
+
+        # Method 2: Fallback to getfattr -d if method 1 failed
+        if [ -z "$context" ] && context_output=$(getfattr -d -n security.selinux "$item" 2>/dev/null); then
+            context=$(echo "$context_output" | grep '^# file: ' -A1 | tail -n1 | sed 's/^security\.selinux=//' | tr -d '"')
+        fi
+
+        # Method 3: Last resort - try getfattr with -m pattern matching
+        if [ -z "$context" ]; then
+            context=$(getfattr -m - "$item" 2>/dev/null | grep '^security\.selinux=' | head -n1 | cut -d'"' -f2 || echo "")
+        fi
+
+        # Clean up the context (remove any remaining quotes or spaces)
+        context=$(echo "$context" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
 
         # Write attributes to their respective config files if valid.
         [ -n "$stats" ] && echo "$rel_path $stats" >> "$FS_CONFIG_FILE"
