@@ -59,14 +59,10 @@ sudo ./android_image_tools.sh --conf=config.conf
 | **Sparse Image Support** | Automatic format handling |
 | **Smart Cleanup** | Automatic temp file management |
 
-## 🖥️ System Requirements
-
-### Supported Systems
-- ✅ Ubuntu and Debian-based distributions
-- ✅ Fedora and RHEL-based distributions
-
 ### Prerequisites
 - **Root access** (sudo required)
+- **Architecture**: x86_64 (AMD64) based system required
+- **Supported Distributions**: Ubuntu/Debian-based or Fedora/RHEL-based Linux distributions
 - **Linux kernel** with loop device support *(preferred method, provides best performance and SELinux compatibility)*
 - **FUSE support** (fallback option for restricted environments, but buggy/limited in SELinux environments)
 
