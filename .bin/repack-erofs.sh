@@ -475,7 +475,7 @@ create_ext4_flexible() {
     # Format with optimal settings
     if [ "$FILESYSTEM_TYPE" == "ext4" ] && [ -n "$ORIGINAL_UUID" ]; then
         # Preserve original filesystem characteristics when available
-        mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$output_img"
+        mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -m "$ORIGINAL_RESERVED_BLOCKS_PERCENTAGE" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$output_img"
     else
         # Use optimized defaults for new filesystem
         mkfs.ext4 -q -b 4096 -i 16384 -m 1 -O ^has_journal,^resize_inode,dir_index,extent,sparse_super "$output_img"
@@ -726,7 +726,7 @@ case $FS_CHOICE in
 
                 echo -e "${BLUE}  - Creating temporary well-sized image...${RESET}"
                 dd if=/dev/zero of="$OUTPUT_IMG" bs="4096" count=$target_blocks status=none
-                mkfs.ext4 -q -b "4096" -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$features_for_mkfs" "$OUTPUT_IMG"
+                mkfs.ext4 -q -b "4096" -m "$ORIGINAL_RESERVED_BLOCKS_PERCENTAGE" -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$features_for_mkfs" "$OUTPUT_IMG"
                 mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
 
             else
@@ -736,7 +736,7 @@ case $FS_CHOICE in
                     features+=",^has_journal"
                 fi
                 dd if=/dev/zero of="$OUTPUT_IMG" bs="$ORIGINAL_BLOCK_SIZE" count="$ORIGINAL_BLOCK_COUNT" status=none
-                mkfs.ext4 -q -b "$ORIGINAL_BLOCK_SIZE" -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$features" "$OUTPUT_IMG"
+                mkfs.ext4 -q -b "$ORIGINAL_BLOCK_SIZE" -m "$ORIGINAL_RESERVED_BLOCKS_PERCENTAGE" -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$features" "$OUTPUT_IMG"
                 mount -o loop,rw,seclabel "$OUTPUT_IMG" "$MOUNT_POINT"
             fi
         fi

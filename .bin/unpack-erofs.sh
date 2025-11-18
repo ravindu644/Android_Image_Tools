@@ -587,7 +587,8 @@ if [ "$SOURCE_FS_TYPE" == "ext4" ]; then
     
     mounted_image=$(findmnt -n -o SOURCE --target "$MOUNT_DIR")
     
-    echo "ORIGINAL_BLOCK_COUNT=$(get_fs_param "$mounted_image" "Block count")" >> "${REPACK_INFO}/metadata.txt"
+    BLOCK_COUNT=$(get_fs_param "$mounted_image" "Block count")
+    echo "ORIGINAL_BLOCK_COUNT=$BLOCK_COUNT" >> "${REPACK_INFO}/metadata.txt"
     echo "ORIGINAL_BLOCK_SIZE=$(get_fs_param "$mounted_image" "Block size")" >> "${REPACK_INFO}/metadata.txt"    
     echo "ORIGINAL_INODE_COUNT=$(get_fs_param "$mounted_image" "Inode count")" >> "${REPACK_INFO}/metadata.txt"
     echo "ORIGINAL_UUID=$(get_fs_param "$mounted_image" "Filesystem UUID")" >> "${REPACK_INFO}/metadata.txt"
@@ -595,6 +596,12 @@ if [ "$SOURCE_FS_TYPE" == "ext4" ]; then
     echo "ORIGINAL_INODE_SIZE=$(get_fs_param "$mounted_image" "Inode size")" >> "${REPACK_INFO}/metadata.txt"
     FEATURES=$(tune2fs -l "$mounted_image" 2>/dev/null | grep "Filesystem features:" | awk -F':' '{print $2}' | xargs | sed 's/ /,/g')
     echo "ORIGINAL_FEATURES=$FEATURES" >> "${REPACK_INFO}/metadata.txt"
+    
+    RESERVED_BLOCKS_COUNT=$(get_fs_param "$mounted_image" "Reserved block count")
+    # Round up to the nearest integer percentage ( using the (a+b-1)/b formula to round up a/b in truncating arithmetic )
+    RESERVED_BLOCKS_PERCENTAGE=$(awk -v r="$RESERVED_BLOCKS_COUNT" -v b="$BLOCK_COUNT" 'BEGIN { printf("%d", (100*r + b - 1) / b) }')
+    echo "ORIGINAL_RESERVED_BLOCKS_PERCENTAGE=$RESERVED_BLOCKS_PERCENTAGE" >> "${REPACK_INFO}/metadata.txt"
+    
 fi
 
 echo ""
