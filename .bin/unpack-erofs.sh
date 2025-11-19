@@ -596,7 +596,7 @@ SOURCE_FS_TYPE=$(get_actual_fs_type "$MOUNT_DIR" "$FS_TYPE")
 echo "FILESYSTEM_TYPE=$SOURCE_FS_TYPE" >> "${REPACK_INFO}/metadata.txt"
 echo "MOUNT_METHOD=$MOUNT_METHOD" >> "${REPACK_INFO}/metadata.txt"
 
-# Proactively save EXT4 metadata for super image workflow
+# Proactively save filesystem metadata for super image workflow
 if [ "$SOURCE_FS_TYPE" == "ext4" ]; then
 
     # Check for the marker file we created in handle_shared_blocks().
@@ -621,6 +621,33 @@ if [ "$SOURCE_FS_TYPE" == "ext4" ]; then
     # Round up to the nearest integer percentage ( using the (a+b-1)/b formula to round up a/b in truncating arithmetic )
     RESERVED_BLOCKS_PERCENTAGE=$(awk -v r="$RESERVED_BLOCKS_COUNT" -v b="$BLOCK_COUNT" 'BEGIN { printf("%d", (100*r + b - 1) / b) }')
     echo "ORIGINAL_RESERVED_BLOCKS_PERCENTAGE=$RESERVED_BLOCKS_PERCENTAGE" >> "${REPACK_INFO}/metadata.txt"
+    
+    # Strip <none> values from metadata file (replace =<none> with =)
+    sed -i 's/=<none>$/=/' "${REPACK_INFO}/metadata.txt"
+    
+elif [ "$SOURCE_FS_TYPE" == "erofs" ]; then
+    # Extract EROFS metadata from file command output
+    file_output=$(file "$IMAGE_FILE" 2>/dev/null)
+    
+    # Extract volume label and UUID using awk
+    echo "$file_output" | awk -F'[, ]' '{
+        for (i=1; i<=NF; i++) {
+            if ($i ~ /^name=/) {
+                gsub(/^name=/, "", $i)
+                if ($i != "") print "ORIGINAL_VOLUME_NAME=" $i
+            }
+            if ($i ~ /^uuid=/) {
+                gsub(/^uuid=/, "", $i)
+                gsub(/-/, "", $i)
+                $i = tolower($i)
+                if (length($i) == 32) {
+                    printf "ORIGINAL_UUID=%s-%s-%s-%s-%s\n", 
+                        substr($i,1,8), substr($i,9,4), substr($i,13,4), 
+                        substr($i,17,4), substr($i,21,12)
+                }
+            }
+        }
+    }' >> "${REPACK_INFO}/metadata.txt"
     
     # Strip <none> values from metadata file (replace =<none> with =)
     sed -i 's/=<none>$/=/' "${REPACK_INFO}/metadata.txt"
