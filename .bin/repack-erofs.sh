@@ -384,9 +384,10 @@ prepare_working_directory() {
     [ -d "$WORK_DIR" ] && rm -rf "$WORK_DIR"
     mkdir -p "$WORK_DIR"
     
-    # Copy with SELinux contexts and progress
+    # Copy files using rsync (handles symlinks, hidden files, etc. better than tar)
+    # We handle permissions/contexts separately via restore_attributes()
     echo -e "${BLUE}Copying files to work directory...${RESET}"
-    (cd "$EXTRACT_DIR" && tar -cf - .) | (cd "$WORK_DIR" && tar -xf -) &
+    rsync -a --exclude='.repack_info' --no-owner --no-group "$EXTRACT_DIR/" "$WORK_DIR/" 2>/dev/null &
     show_copy_progress "$EXTRACT_DIR" "$WORK_DIR"
     wait $!
     
@@ -415,6 +416,65 @@ create_ext4_image_quiet() {
 
     mkdir -p "$mount_point"
     mount -o loop,rw,seclabel "$output" "$mount_point" 2>/dev/null
+}
+
+# Prepare EXT4 features string for mkfs (disables default features not in original)
+prepare_ext4_features() {
+    local original_features="$1"
+    local features_for_mkfs
+    
+    # Clean up feature string and disable journal if not present
+    features_for_mkfs=$(echo "$original_features" | sed 's/,,/,/g')
+    if [[ "$features_for_mkfs" != *has_journal* ]]; then
+        features_for_mkfs+=",^has_journal"
+    fi
+    
+    # Disable default features that mkfs.ext4 might add automatically
+    local DEFAULT_FEATURES_TO_CHECK=("resize_inode" "64bit" "flex_bg" "metadata_csum")
+    for feature in "${DEFAULT_FEATURES_TO_CHECK[@]}"; do
+        if [[ "$original_features" != *"$feature"* ]]; then
+            features_for_mkfs+=",^$feature"
+        fi
+    done
+    
+    echo "$features_for_mkfs"
+}
+
+# Create EXT4 image with original parameters
+create_ext4_image_strict() {
+    local output_img="$1"
+    local block_size="$2"
+    local block_count="$3"
+    local features="$4"
+    
+    dd if=/dev/zero of="$output_img" bs="$block_size" count="$block_count" status=none
+    local mkfs_cmd="mkfs.ext4 -q -b $block_size -m $ORIGINAL_RESERVED_BLOCKS_PERCENTAGE -I $ORIGINAL_INODE_SIZE -N $ORIGINAL_INODE_COUNT -U $ORIGINAL_UUID -O $features"
+    [ -n "$ORIGINAL_VOLUME_NAME" ] && mkfs_cmd+=" -L $ORIGINAL_VOLUME_NAME"
+    eval "$mkfs_cmd $output_img"
+}
+
+# Check if rsync failed due to space issues
+check_rsync_space_error() {
+    local exit_code="$1"
+    local log_file="$2"
+    
+    if [ "$exit_code" -eq 0 ]; then
+        return 1  # No error
+    fi
+    
+    # Check log for space-related errors
+    if grep -qi "No space left on device\|write failed\|failed to set\|error.*space\|ENOSPC" "$log_file" 2>/dev/null; then
+        return 0  # Space error detected
+    fi
+    
+    # Check exit codes that often indicate space issues
+    if [ "$exit_code" -eq 11 ] || [ "$exit_code" -eq 23 ]; then
+        if grep -qi "No space\|space left" "$log_file" 2>/dev/null; then
+            return 0  # Space error detected
+        fi
+    fi
+    
+    return 1  # Not a space error
 }
 
 calculate_optimal_ext4_size() {
@@ -728,53 +788,72 @@ case $FS_CHOICE in
                 echo -e "\n${YELLOW}${BOLD}Special 'shared_blocks' feature detected. Creating optimized mountable image.${RESET}\n"
                 
                 target_blocks=$(calculate_optimal_ext4_size "$EXTRACT_DIR" 10)
-
-                # Prepare the base feature string for mkfs
-                features_for_mkfs=$(echo "$ORIGINAL_FEATURES" | sed 's/shared_blocks//g' | sed 's/,,/,/g')
-                if [[ "$features_for_mkfs" != *has_journal* ]]; then
-                    features_for_mkfs+=",^has_journal"
-                fi
-
-                # Define default features that mkfs.ext4 might add automatically
-                DEFAULT_FEATURES_TO_CHECK=("resize_inode" "64bit" "flex_bg" "metadata_csum")
-                
-                # For each default feature, check if it was in the original. If not, explicitly disable it.
-                for feature in "${DEFAULT_FEATURES_TO_CHECK[@]}"; do
-                    if [[ "$ORIGINAL_FEATURES" != *"$feature"* ]]; then
-                        features_for_mkfs+=",^$feature"
-                    fi
-                done
+                features_for_mkfs=$(prepare_ext4_features "$(echo "$ORIGINAL_FEATURES" | sed 's/shared_blocks//g')")
 
                 echo -e "${BLUE}  - Creating temporary well-sized image...${RESET}"
-                dd if=/dev/zero of="$OUTPUT_IMG" bs="4096" count=$target_blocks status=none
-                if [ -n "$ORIGINAL_VOLUME_NAME" ]; then
-                    mkfs.ext4 -q -b "4096" -m "$ORIGINAL_RESERVED_BLOCKS_PERCENTAGE" -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$features_for_mkfs" "$OUTPUT_IMG"
-                else
-                    mkfs.ext4 -q -b "4096" -m "$ORIGINAL_RESERVED_BLOCKS_PERCENTAGE" -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -O "$features_for_mkfs" "$OUTPUT_IMG"
-                fi
+                create_ext4_image_strict "$OUTPUT_IMG" "4096" "$target_blocks" "$features_for_mkfs"
                 mount -o loop,rw "$OUTPUT_IMG" "$MOUNT_POINT"
 
             else
-                # Original strict mode logic for images without shared_blocks.
-                features="$ORIGINAL_FEATURES"
-                if [[ "$features" != *has_journal* ]]; then
-                    features+=",^has_journal"
-                fi
-                dd if=/dev/zero of="$OUTPUT_IMG" bs="$ORIGINAL_BLOCK_SIZE" count="$ORIGINAL_BLOCK_COUNT" status=none
-                if [ -n "$ORIGINAL_VOLUME_NAME" ]; then
-                    mkfs.ext4 -q -b "$ORIGINAL_BLOCK_SIZE" -m "$ORIGINAL_RESERVED_BLOCKS_PERCENTAGE" -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$features" "$OUTPUT_IMG"
-                else
-                    mkfs.ext4 -q -b "$ORIGINAL_BLOCK_SIZE" -m "$ORIGINAL_RESERVED_BLOCKS_PERCENTAGE" -I "$ORIGINAL_INODE_SIZE" -N "$ORIGINAL_INODE_COUNT" -U "$ORIGINAL_UUID" -O "$features" "$OUTPUT_IMG"
-                fi
+                # Original strict mode logic for images without shared_blocks
+                features_for_mkfs=$(prepare_ext4_features "$ORIGINAL_FEATURES")
+                create_ext4_image_strict "$OUTPUT_IMG" "$ORIGINAL_BLOCK_SIZE" "$ORIGINAL_BLOCK_COUNT" "$features_for_mkfs"
                 mount -o loop,rw,seclabel "$OUTPUT_IMG" "$MOUNT_POINT"
             fi
         fi
         
         echo -e "\n${BLUE}Copying files to final image...${RESET}"
-        (cd "$EXTRACT_DIR" && tar --exclude=.repack_info -cf - .) | (cd "$MOUNT_POINT" && tar -xf -) &
-        show_copy_progress "$EXTRACT_DIR" "$MOUNT_POINT"
-        wait $!
+        local rsync_log_file
+        rsync_log_file=$(mktemp)
+        set +e  # Disable exit on error to catch copy failures
+        rsync -a --exclude='.repack_info' --no-owner --no-group "$EXTRACT_DIR/" "$MOUNT_POINT/" 2>&1 | tee "$rsync_log_file"
+        local copy_exit_code=$?
+        set -e  # Re-enable exit on error
         
+        # Check if copy failed due to space issues
+        local copy_failed=false
+        if check_rsync_space_error "$copy_exit_code" "$rsync_log_file"; then
+            copy_failed=true
+        fi
+        
+        # If strict mode copy failed due to space, fall back to resize approach
+        if [ "$copy_failed" = true ] && [ "$EXT4_MODE" == "strict" ] && [ "$ORIGINAL_HAS_SHARED_BLOCKS" != "true" ]; then
+            echo -e "\n${YELLOW}${BOLD}Warning: Copy failed due to insufficient space in strict mode.${RESET}"
+            echo -e "${YELLOW}This can happen due to block allocation differences. Falling back to resize approach...${RESET}\n"
+            
+            # Unmount and remove the failed image
+            sync && umount "$MOUNT_POINT" 2>/dev/null || true
+            rm -f "$OUTPUT_IMG"
+            
+            # Use the shared_blocks approach: create larger image, copy, then resize
+            target_blocks=$(calculate_optimal_ext4_size "$EXTRACT_DIR" 10)
+            features_for_mkfs=$(prepare_ext4_features "$ORIGINAL_FEATURES")
+            
+            echo -e "${BLUE}  - Creating temporary well-sized image...${RESET}"
+            create_ext4_image_strict "$OUTPUT_IMG" "4096" "$target_blocks" "$features_for_mkfs"
+            mount -o loop,rw,seclabel "$OUTPUT_IMG" "$MOUNT_POINT"
+            
+            # Retry copying with the larger image
+            echo -e "${BLUE}  - Copying files to temporary image...${RESET}"
+            set +e  # Disable exit on error to check result
+            rsync -a --exclude='.repack_info' --no-owner --no-group "$EXTRACT_DIR/" "$MOUNT_POINT/" 2>/dev/null &
+            show_copy_progress "$EXTRACT_DIR" "$MOUNT_POINT"
+            wait $!
+            local fallback_copy_exit=$?
+            set -e  # Re-enable exit on error
+            
+            if [ $fallback_copy_exit -ne 0 ]; then
+                echo -e "\n${RED}${BOLD}Error: Copy failed even with larger image.${RESET}"
+                umount "$MOUNT_POINT" 2>/dev/null || true
+                rm -f "$OUTPUT_IMG" "$rsync_log_file"
+                exit 1
+            fi
+        fi
+        
+        # Cleanup temp log file
+        rm -f "$rsync_log_file"
+        
+        # Verify and restore attributes (for both successful first try and fallback)
         verify_modifications "$MOUNT_POINT"
         restore_attributes "$MOUNT_POINT"
         remove_repack_info "$MOUNT_POINT"
@@ -782,11 +861,14 @@ case $FS_CHOICE in
         echo -e "${BLUE}Unmounting image...${RESET}"
         sync && umount "$MOUNT_POINT"
         
-        if [ "$EXT4_MODE" == "strict" ] && [ "$ORIGINAL_HAS_SHARED_BLOCKS" == "true" ]; then
-            echo -e "${BLUE}  - Finalizing optimized image...${RESET}"
-            e2fsck -fy "$OUTPUT_IMG" >/dev/null 2>&1
-            echo -e "${BLUE}  - Resizing filesystem to minimum possible size...${RESET}"
-            resize2fs -M "$OUTPUT_IMG" >/dev/null 2>&1
+        # Resize if we used the fallback approach or if shared_blocks mode
+        if [ "$EXT4_MODE" == "strict" ]; then
+            if [ "$ORIGINAL_HAS_SHARED_BLOCKS" == "true" ] || [ "$copy_failed" = true ]; then
+                echo -e "${BLUE}  - Finalizing optimized image...${RESET}"
+                e2fsck -fy "$OUTPUT_IMG" >/dev/null 2>&1
+                echo -e "${BLUE}  - Resizing filesystem to minimum possible size...${RESET}"
+                resize2fs -M "$OUTPUT_IMG" >/dev/null 2>&1
+            fi
         fi
         
         e2fsck -yf "$OUTPUT_IMG" >/dev/null 2>&1

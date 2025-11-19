@@ -38,11 +38,11 @@ check_dependencies() {
     local erofs_utils_missing=false
 
     if [ "$OS_TYPE" = "debian" ]; then
-        local REQUIRED_PACKAGES=("android-sdk-libsparse-utils" "build-essential" "automake" "autoconf" "libtool" "pkg-config" "git" "fuse3" "e2fsprogs" "pv" "liblz4-dev" "uuid-dev" "libfuse3-dev" "fuse3" "f2fs-tools" "fuse2fs" "attr" "zlib1g-dev")
+        local REQUIRED_PACKAGES=("android-sdk-libsparse-utils" "build-essential" "automake" "autoconf" "libtool" "pkg-config" "git" "fuse3" "e2fsprogs" "pv" "liblz4-dev" "uuid-dev" "libfuse3-dev" "fuse3" "f2fs-tools" "fuse2fs" "attr" "zlib1g-dev" "rsync")
         local check_cmd="dpkg -s"
         local install_cmd="apt"
     elif [ "$OS_TYPE" = "rhel" ]; then
-        local REQUIRED_PACKAGES=("android-tools" "gcc" "make" "automake" "autoconf" "libtool" "pkgconf" "git" "fuse3" "e2fsprogs" "pv" "lz4-devel" "libuuid-devel" "fuse3-devel" "fuse3" "f2fs-tools" "attr" "zlib-ng-compat-devel")
+        local REQUIRED_PACKAGES=("android-tools" "gcc" "make" "automake" "autoconf" "libtool" "pkgconf" "git" "fuse3" "e2fsprogs" "pv" "lz4-devel" "libuuid-devel" "fuse3-devel" "fuse3" "f2fs-tools" "attr" "zlib-ng-compat-devel" "rsync")
         local check_cmd="rpm -q"
         local install_cmd="dnf"
     fi
