@@ -110,6 +110,17 @@ TEMP_ROOT="$TMP_DIR/repack-erofs"
 WORK_DIR="${TEMP_ROOT}/${PARTITION_NAME}_work"
 MOUNT_POINT=""
 
+# Safely load metadata from file (handles values like <none>)
+load_metadata() {
+    local metadata_file="$1"
+    [ ! -f "$metadata_file" ] && return
+    while IFS='=' read -r key value; do
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$key" ]] && continue
+        export "${key}"="${value}"
+    done < "$metadata_file"
+}
+
 cleanup() {
     if [ "$NO_BANNER" = false ]; then
         echo -e "\n${YELLOW}Cleaning up temporary files...${RESET}"
@@ -538,7 +549,7 @@ fi
 # Load metadata to check mount method
 MOUNT_METHOD=""
 if [ -f "${REPACK_INFO}/metadata.txt" ]; then
-    source <(sed 's/=<none>/=""/g' "${REPACK_INFO}/metadata.txt")
+    load_metadata "${REPACK_INFO}/metadata.txt"
 fi
 
 # Add filesystem selection before any operations
@@ -664,8 +675,8 @@ case $FS_CHOICE in
             [ "$repack_mode_choice" == "1" ] && EXT4_MODE="strict" || EXT4_MODE="flexible"
         fi
         
-        # Source metadata first to get variables
-        source <(sed 's/=<none>/=""/g; s/=</="</g; s/>$/"/g' "${REPACK_INFO}/metadata.txt")
+        # Load metadata first to get variables
+        load_metadata "${REPACK_INFO}/metadata.txt"
 
         # Fallback logic to ensure critical variables are set if metadata is old
         if [ -z "$ORIGINAL_BLOCK_COUNT" ] || [ -z "$ORIGINAL_BLOCK_SIZE" ]; then

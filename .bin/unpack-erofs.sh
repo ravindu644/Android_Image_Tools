@@ -116,8 +116,8 @@ if [ "$(stat -c%s "$IMAGE_FILE" 2>/dev/null)" -eq 0 ] || file "$IMAGE_FILE" 2>/d
     echo "IS_EMPTY_PARTITION=true"
   } > "${REPACK_INFO}/metadata.txt"
   
-  # Strip <none> values from metadata file
-  sed -i 's/=<none>$//' "${REPACK_INFO}/metadata.txt"
+  # Strip <none> values from metadata file (replace =<none> with =)
+  sed -i 's/=<none>$/=/' "${REPACK_INFO}/metadata.txt"
   
   [ "$INTERACTIVE_MODE" = true ] && echo -e "${GREEN}${BOLD}[✓] Empty partition marker created.${RESET}"
   exit 0

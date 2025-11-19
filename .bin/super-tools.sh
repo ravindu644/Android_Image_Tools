@@ -20,14 +20,22 @@ BIN_DIR="${SCRIPT_DIR}" # Modified by user for .bin structure
 PROJECT_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd )"
 TMP_DIR="$PROJECT_ROOT/.tmp"
 
+# Ensure .tmp directory exists
+mkdir -p "$TMP_DIR"
+
 if [ -d "$BIN_DIR" ]; then
     export PATH="$BIN_DIR:$PATH"
 fi
 
 # --- Core Functions ---
 cleanup() {
+    # Only cleanup temporary subdirectories, not the entire .tmp directory
+    # (it may contain other temporary files from other processes)
     if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
-        rm -rf "$TMP_DIR"
+        # Only remove if it's a temporary subdirectory (contains super_unpack_ or super_repack_)
+        if [[ "$TMP_DIR" == *"super_unpack_"* ]] || [[ "$TMP_DIR" == *"super_repack_"* ]]; then
+            rm -rf "$TMP_DIR"
+        fi
     fi
     
     # Restore original SELinux status
@@ -178,6 +186,8 @@ run_unpack() {
     fi
 
     # Move the config file alongside the logical partitions' destination
+    # Ensure .metadata directory exists first
+    mkdir -p "${output_dir}/../.metadata"
     mv "$config_file" "${output_dir}/../.metadata/super_repack_info.txt"
 }
 
