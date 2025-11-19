@@ -488,35 +488,61 @@ calculate_optimal_ext4_size() {
     local content_bytes=$(du -sb --exclude=.repack_info "$content_dir" | awk '{print $1}')
     echo -e "${BLUE}├─ Content size: $(numfmt --to=iec-i --suffix=B $content_bytes)${RESET}" >&2
     
-    # Step 2: Calculate ext4 metadata overhead
-    # Count files and directories for inode calculation
-    local file_count=$(find "$content_dir" -not -path "*/.repack_info/*" | wc -l)
+    # Step 2: Calculate block allocation overhead (files take whole blocks)
+    local block_size=4096
+    local file_count=$(find "$content_dir" -not -path "*/.repack_info/*" -type f | wc -l)
     local dir_count=$(find "$content_dir" -type d -not -path "*/.repack_info/*" | wc -l)
     
-    # Calculate required inodes (files + dirs + some buffer for lost+found, etc.)
+    # Estimate block allocation overhead more conservatively
+    # Each file/directory takes at least 1 block, and files may have partial blocks
+    # Use a conservative estimate: assume 2-3% overhead for block allocation
+    # This accounts for small files, partial blocks, and directory blocks
+    local block_allocation_overhead=$((content_bytes * 3 / 100))
+    
+    # Step 3: Calculate ext4 metadata overhead
+    # Count files and directories for inode calculation
     local required_inodes=$((file_count + dir_count + 100))
     
     # Ext4 uses 1 inode per 16KB by default, but we'll be more precise
     local inode_size=256  # Default inode size
-    local block_size=4096
     
     # Calculate minimum blocks needed for inodes
     local inode_table_blocks=$(( (required_inodes * inode_size + block_size - 1) / block_size ))
     
-    # Calculate ext4 filesystem overhead (approximately 5-7% for metadata)
-    local fs_metadata_overhead=$((content_bytes * 7 / 100))
+    # Base metadata overhead: superblock, group descriptors, bitmaps, etc.
+    # Estimate ~300KB base (more conservative)
+    local base_metadata_overhead=$((300 * 1024))
     
-    # Step 3: Calculate base filesystem size
-    local base_fs_size=$((content_bytes + fs_metadata_overhead + inode_table_blocks * block_size))
+    # Directory entries overhead: each directory needs space for entries and directory blocks
+    # Estimate ~2-4KB per directory (more conservative for directory blocks)
+    local dir_entry_overhead=$((dir_count * 3072))  # ~3KB per directory
     
-    echo -e "${BLUE}├─ Metadata overhead: $(numfmt --to=iec-i --suffix=B $fs_metadata_overhead)${RESET}" >&2
+    # Content-based metadata overhead (more accurate than percentage)
+    # Account for extent trees, directory blocks, etc.
+    # Increase to 10% to be more conservative
+    local content_metadata_overhead=$((content_bytes * 10 / 100))  # 10% for content metadata
+    
+    # Safety margin for block allocation differences and mkfs.ext4 overhead
+    # Increase significantly - mkfs.ext4 can allocate more than expected
+    local safety_margin=$((800 * 1024))  # 800KB safety margin
+    
+    # Total metadata overhead
+    local total_metadata_overhead=$((base_metadata_overhead + dir_entry_overhead + content_metadata_overhead + safety_margin + inode_table_blocks * block_size))
+    
+    echo -e "${BLUE}├─ Base metadata overhead: $(numfmt --to=iec-i --suffix=B $base_metadata_overhead)${RESET}" >&2
+    echo -e "${BLUE}├─ Content overhead (8%): $(numfmt --to=iec-i --suffix=B $content_metadata_overhead)${RESET}" >&2
+    echo -e "${BLUE}├─ Safety margin: $(numfmt --to=iec-i --suffix=B $safety_margin)${RESET}" >&2
+    echo -e "${BLUE}├─ Total metadata overhead: $(numfmt --to=iec-i --suffix=B $total_metadata_overhead)${RESET}" >&2
     echo -e "${BLUE}├─ Required inodes: $required_inodes${RESET}" >&2
     
-    # Step 4: Add user-specified overhead (using integer arithmetic)
+    # Step 4: Calculate base filesystem size (content + block overhead + metadata)
+    local base_fs_size=$((content_bytes + block_allocation_overhead + total_metadata_overhead))
+    
+    # Step 5: Add user-specified overhead (using integer arithmetic)
     local user_overhead=$((base_fs_size * overhead_percent / 100))
     local final_size=$((base_fs_size + user_overhead))
     
-    # Step 5: Round up to nearest block boundary
+    # Step 6: Round up to nearest block boundary
     local final_blocks=$(( (final_size + block_size - 1) / block_size ))
     local final_size_rounded=$((final_blocks * block_size))
     
@@ -535,54 +561,81 @@ create_ext4_flexible() {
     
     echo -e "\n${YELLOW}${BOLD}Flexible mode: Calculating optimal image size...${RESET}\n"
     
-    # Get optimal size using our smart calculation
-    local optimal_blocks=$(calculate_optimal_ext4_size "$extract_dir" "$overhead_percent")
-    
-    echo -e "\n${BLUE}Creating optimally sized ext4 image...${RESET}"
-    
-    # Create the image with calculated size
-    dd if=/dev/zero of="$output_img" bs=4096 count="$optimal_blocks" status=none
-    
-    # Format with optimal settings
-    if [ "$FILESYSTEM_TYPE" == "ext4" ] && [ -n "$ORIGINAL_UUID" ]; then
-        # Preserve original filesystem characteristics when available
-        if [ -n "$ORIGINAL_VOLUME_NAME" ]; then
-            mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -m "$ORIGINAL_RESERVED_BLOCKS_PERCENTAGE" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$output_img"
-        else
-            mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -m "$ORIGINAL_RESERVED_BLOCKS_PERCENTAGE" -U "$ORIGINAL_UUID" -O "$ORIGINAL_FEATURES" "$output_img"
-        fi
-    else
-        # Use optimized defaults for new filesystem
-        mkfs.ext4 -q -b 4096 -i 16384 -m 1 -O ^has_journal,^resize_inode,dir_index,extent,sparse_super "$output_img"
-    fi
-    
-    # Mount the new filesystem
-    mkdir -p "$mount_point"
-    mount -o loop,rw "$output_img" "$mount_point"
-    
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}Error: Failed to mount created image${RESET}"
-        return 1
-    fi
-    
-    echo -e "${GREEN}✓ Image created and mounted successfully${RESET}"
-    
-    # Verify we have enough space
-    local available_space=$(df --output=avail -B1 "$mount_point" | tail -n1)
-    local total_space=$(df --output=size -B1 "$mount_point" | tail -n1)
     local content_size=$(du -sb --exclude=.repack_info "$extract_dir" | awk '{print $1}')
+    local max_attempts=5
+    local attempt=1
+    local optimal_blocks
     
-    if [ "$available_space" -lt "$content_size" ]; then
-        echo -e "${RED}Error: Insufficient space in created image${RESET}"
-        umount "$mount_point"
-        return 1
-    fi
+    while [ $attempt -le $max_attempts ]; do
+        if [ $attempt -eq 1 ]; then
+            # First attempt: use calculated size + 10% overhead for mkfs.ext4 metadata
+            optimal_blocks=$(calculate_optimal_ext4_size "$extract_dir" "$overhead_percent")
+            optimal_blocks=$((optimal_blocks + (optimal_blocks * 10 / 100)))  # Add 10% overhead
+        else
+            # Subsequent attempts: increase size by 10% each time
+            echo -e "${YELLOW}Attempt $attempt: Increasing image size by 10%...${RESET}"
+            optimal_blocks=$((optimal_blocks + (optimal_blocks * 10 / 100)))
+        fi
+        
+        echo -e "\n${BLUE}Creating ext4 image (${optimal_blocks} blocks)...${RESET}"
+        
+        # Create the image with calculated size
+        dd if=/dev/zero of="$output_img" bs=4096 count="$optimal_blocks" status=none
+        
+        # Format with optimal settings
+        if [ "$FILESYSTEM_TYPE" == "ext4" ] && [ -n "$ORIGINAL_UUID" ]; then
+            # Preserve original filesystem characteristics when available
+            if [ -n "$ORIGINAL_VOLUME_NAME" ]; then
+                mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -m "$ORIGINAL_RESERVED_BLOCKS_PERCENTAGE" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$output_img"
+            else
+                mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -m "$ORIGINAL_RESERVED_BLOCKS_PERCENTAGE" -U "$ORIGINAL_UUID" -O "$ORIGINAL_FEATURES" "$output_img"
+            fi
+        else
+            # Use optimized defaults for new filesystem
+            mkfs.ext4 -q -b 4096 -i 16384 -m 1 -O ^has_journal,^resize_inode,dir_index,extent,sparse_super "$output_img"
+        fi
+        
+        # Mount the new filesystem
+        mkdir -p "$mount_point"
+        mount -o loop,rw "$output_img" "$mount_point" 2>/dev/null
+        
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}Error: Failed to mount created image${RESET}"
+            rm -f "$output_img"
+            attempt=$((attempt + 1))
+            continue
+        fi
+        
+        echo -e "${GREEN}✓ Image created and mounted successfully${RESET}"
+        
+        # Verify we have enough space
+        local available_space=$(df --output=avail -B1 "$mount_point" | tail -n1)
+        local total_space=$(df --output=size -B1 "$mount_point" | tail -n1)
+        
+        # Add 5% buffer for safety (ext4 can have allocation differences)
+        local required_space=$((content_size + (content_size * 5 / 100)))
+        
+        if [ "$available_space" -ge "$required_space" ]; then
+            # Success! We have enough space
+            local free_after_copy=$((available_space - content_size))
+            local free_percentage=$(( free_after_copy * 100 / total_space ))
+            if [ $attempt -gt 1 ]; then
+                echo -e "${GREEN}✓ Sufficient space after size adjustment${RESET}"
+            fi
+            echo -e "${BLUE}Available space: $(numfmt --to=iec-i --suffix=B $available_space) (~${free_percentage}% free after copy)${RESET}"
+            return 0
+        else
+            # Not enough space, unmount and try again with larger size
+            echo -e "\n${YELLOW}Insufficient space: Available $(numfmt --to=iec-i --suffix=B $available_space), Required $(numfmt --to=iec-i --suffix=B $required_space)${RESET}"
+            umount "$mount_point" 2>/dev/null
+            rm -f "$output_img"
+            attempt=$((attempt + 1))
+        fi
+    done
     
-    local free_after_copy=$((available_space - content_size))
-    local free_percentage=$(( free_after_copy * 100 / total_space ))
-    echo -e "${BLUE}Available space: $(numfmt --to=iec-i --suffix=B $available_space) (~${free_percentage}% free after copy)${RESET}"
-    
-    return 0
+    # All attempts failed
+    echo -e "${RED}Error: Failed to create image with sufficient space after $max_attempts attempts${RESET}"
+    return 1
 }
 
 # Function to get original filesystem parameters (robust and universal)
@@ -803,23 +856,23 @@ case $FS_CHOICE in
         fi
         
         echo -e "\n${BLUE}Copying files to final image...${RESET}"
-        local rsync_log_file
         rsync_log_file=$(mktemp)
         set +e  # Disable exit on error to catch copy failures
-        rsync -a --exclude='.repack_info' --no-owner --no-group "$EXTRACT_DIR/" "$MOUNT_POINT/" 2>&1 | tee "$rsync_log_file"
-        local copy_exit_code=$?
+        # Hide rsync output - we'll show a cleaner message if it fails
+        rsync -a --exclude='.repack_info' --no-owner --no-group "$EXTRACT_DIR/" "$MOUNT_POINT/" >"$rsync_log_file" 2>&1
+        copy_exit_code=$?
         set -e  # Re-enable exit on error
         
         # Check if copy failed due to space issues
-        local copy_failed=false
+        copy_failed=false
         if check_rsync_space_error "$copy_exit_code" "$rsync_log_file"; then
             copy_failed=true
         fi
         
         # If strict mode copy failed due to space, fall back to resize approach
         if [ "$copy_failed" = true ] && [ "$EXT4_MODE" == "strict" ] && [ "$ORIGINAL_HAS_SHARED_BLOCKS" != "true" ]; then
-            echo -e "\n${YELLOW}${BOLD}Warning: Copy failed due to insufficient space in strict mode.${RESET}"
-            echo -e "${YELLOW}This can happen due to block allocation differences. Falling back to resize approach...${RESET}\n"
+            echo -e "${YELLOW}Copy failed due to insufficient space.${RESET}"
+            echo -e "${YELLOW}Using generic resize method to create image...${RESET}\n"
             
             # Unmount and remove the failed image
             sync && umount "$MOUNT_POINT" 2>/dev/null || true
@@ -839,7 +892,7 @@ case $FS_CHOICE in
             rsync -a --exclude='.repack_info' --no-owner --no-group "$EXTRACT_DIR/" "$MOUNT_POINT/" 2>/dev/null &
             show_copy_progress "$EXTRACT_DIR" "$MOUNT_POINT"
             wait $!
-            local fallback_copy_exit=$?
+            fallback_copy_exit=$?
             set -e  # Re-enable exit on error
             
             if [ $fallback_copy_exit -ne 0 ]; then
@@ -865,17 +918,21 @@ case $FS_CHOICE in
         if [ "$EXT4_MODE" == "strict" ]; then
             if [ "$ORIGINAL_HAS_SHARED_BLOCKS" == "true" ] || [ "$copy_failed" = true ]; then
                 echo -e "${BLUE}  - Finalizing optimized image...${RESET}"
+                set +e  # Disable exit on error for resize operations
                 e2fsck -fy "$OUTPUT_IMG" >/dev/null 2>&1
                 echo -e "${BLUE}  - Resizing filesystem to minimum possible size...${RESET}"
                 resize2fs -M "$OUTPUT_IMG" >/dev/null 2>&1
+                set -e  # Re-enable exit on error
             fi
         fi
         
+        set +e  # Disable exit on error for final e2fsck
         e2fsck -yf "$OUTPUT_IMG" >/dev/null 2>&1
+        set -e  # Re-enable exit on error
         [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$OUTPUT_IMG"
 
         echo -e "\n${GREEN}${BOLD}Successfully created EXT4 image: $OUTPUT_IMG${RESET}"
-        echo -e "${BLUE}Image size: $(stat -c %s "$OUTPUT_IMG" | numfmt --to=iec-i --suffix=B)${RESET}\n"
+        echo -e "${BLUE}Image size: $(stat -c %s "$OUTPUT_IMG" | numfmt --to=iec-i --suffix=B)${RESET}"
         ;;
         
     *)
