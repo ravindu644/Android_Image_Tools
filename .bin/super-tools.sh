@@ -87,7 +87,6 @@ parse_lpdump_and_save_config() {
     echo "# Repack config for super image, generated on $(date)" > "$config_file"
     echo "METADATA_SLOTS=$(grep -m 1 "Metadata slot count:" "$lpdump_file" | awk '{print $NF}')" >> "$config_file"
     echo "SUPER_DEVICE_SIZE=$super_device_size" >> "$config_file"
-    echo >> "$config_file"
 
     awk '
         /Partition table:/ { in_partition_table=1; next }
@@ -109,7 +108,6 @@ parse_lpdump_and_save_config() {
                 first=0
             }
             print "\""
-            print ""
 
             for (group_name in partitions_in_group) {
                 sub(/^ /, "", partitions_in_group[group_name])
@@ -117,6 +115,9 @@ parse_lpdump_and_save_config() {
             }
         }
     ' "$lpdump_file" >> "$config_file"
+    
+    # Strip <none> values from config file (replace =<none> with =)
+    sed -i 's/=<none>$/=/' "$config_file"
     
     echo -e "${GREEN}[✓] Repack configuration saved.${RESET}"
 }

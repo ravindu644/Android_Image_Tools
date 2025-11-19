@@ -881,6 +881,9 @@ run_super_create_config_interactive() {
     fi
     } > "$final_config_file"
 
+    # Strip <none> values from config file (replace =<none> with =)
+    sed -i 's/=<none>$/=/' "$final_config_file"
+
     echo -e "\n${GREEN}${BOLD}[✓] Universal repack configuration saved to: ${RESET}${final_config_file}"
     read -rp $'\nPress Enter to return...'
 }

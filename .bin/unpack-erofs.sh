@@ -115,6 +115,10 @@ if [ "$(stat -c%s "$IMAGE_FILE" 2>/dev/null)" -eq 0 ] || file "$IMAGE_FILE" 2>/d
     echo "MOUNT_METHOD=none"
     echo "IS_EMPTY_PARTITION=true"
   } > "${REPACK_INFO}/metadata.txt"
+  
+  # Strip <none> values from metadata file
+  sed -i 's/=<none>$//' "${REPACK_INFO}/metadata.txt"
+  
   [ "$INTERACTIVE_MODE" = true ] && echo -e "${GREEN}${BOLD}[✓] Empty partition marker created.${RESET}"
   exit 0
 fi
@@ -618,6 +622,8 @@ if [ "$SOURCE_FS_TYPE" == "ext4" ]; then
     RESERVED_BLOCKS_PERCENTAGE=$(awk -v r="$RESERVED_BLOCKS_COUNT" -v b="$BLOCK_COUNT" 'BEGIN { printf("%d", (100*r + b - 1) / b) }')
     echo "ORIGINAL_RESERVED_BLOCKS_PERCENTAGE=$RESERVED_BLOCKS_PERCENTAGE" >> "${REPACK_INFO}/metadata.txt"
     
+    # Strip <none> values from metadata file (replace =<none> with =)
+    sed -i 's/=<none>$/=/' "${REPACK_INFO}/metadata.txt"
 fi
 
 echo ""
