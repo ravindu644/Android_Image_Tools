@@ -117,6 +117,55 @@ display_final_image_size() {
     echo -e "\n${GREEN}${BOLD}Final Image Size: ${file_size}${RESET}"
 }
 
+is_empty_partition() {
+    local image_path="$1"
+    [ ! -f "$image_path" ] && return 1
+    
+    local file_size
+    file_size=$(stat -c%s "$image_path" 2>/dev/null)
+    
+    # 0-byte files are definitely empty
+    [ "$file_size" -eq 0 ] && return 0
+    
+    # Files reported as "empty" by the file command
+    file "$image_path" 2>/dev/null | grep -q "empty" && return 0
+    
+    # For small files (<= 4096 bytes), check if they are all zeros
+    if [ "$file_size" -le 4096 ]; then
+        local temp_zero
+        temp_zero=$(mktemp)
+        dd if=/dev/zero of="$temp_zero" bs=1 count="$file_size" 2>/dev/null
+        if cmp -s "$image_path" "$temp_zero" 2>/dev/null; then
+            rm -f "$temp_zero"
+            return 0
+        fi
+        rm -f "$temp_zero"
+    fi
+    return 1
+}
+
+# Safely load metadata from file (handles values like <none>)
+load_metadata() {
+    local metadata_file="$1"
+    [ ! -f "$metadata_file" ] && return
+    while IFS='=' read -r key value; do
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$key" ]] && continue
+        export "${key}"="${value}"
+    done < "$metadata_file"
+}
+
+# Read empty partitions list into array
+read_empty_partitions() {
+    local empty_partitions_file="$1"
+    local -n empty_array="$2"
+    empty_array=()
+    [ ! -f "$empty_partitions_file" ] && return
+    while IFS= read -r empty_part; do
+        [ -n "$empty_part" ] && empty_array+=("$empty_part")
+    done < "$empty_partitions_file"
+}
+
 # --- Interactive Menu Functions ---
 select_option() {
     local header="$1"
@@ -195,13 +244,13 @@ select_item() {
 
     case "$item_type" in
 
-        # This one specifically excludes any file starting with 'super'
+        # This one specifically excludes any file containing 'super' in the name
         single_partition_image)
-            find_args=(-type f \( -name '*.img' -o -name '*.img.raw' \) -not -name 'super*.img')
+            find_args=(-type f \( -name '*.img' -o -name '*.img.raw' \) ! -name '*super*')
             ;;
-        # This one is for finding ALL images, including super.img
+        # This one is for finding ONLY super images (files with 'super' in the name)
         image_file)
-            find_args=(-type f \( -name '*.img' -o -name '*.img.raw' \))
+            find_args=(-type f \( -name '*super*.img' -o -name '*super*.img.raw' \))
             ;;
         dir)
             find_args=(-type d)
@@ -442,10 +491,8 @@ run_repack_interactive() {
                 output_image=${output_image:-$default_output_image}; step=3;;
             3)
                 local mount_method=""
-                if [ -f "${source_dir}/.repack_info/metadata.txt" ]; then
-                    source <(grep = "${source_dir}/.repack_info/metadata.txt")
-                    mount_method="${MOUNT_METHOD}"
-                fi
+                load_metadata "${source_dir}/.repack_info/metadata.txt"
+                mount_method="${MOUNT_METHOD}"
 
                 if [ "$mount_method" == "fuse" ]; then
                     clear; print_banner
@@ -555,45 +602,72 @@ run_super_unpack_interactive() {
 
     set +e # Disable exit on error for the loop
     local partition_list_file="${metadata_dir}/partition_list.txt"
-    touch "$partition_list_file"
+    local empty_partitions_file="${metadata_dir}/empty_partitions.txt"
+    touch "$partition_list_file" "$empty_partitions_file"
 
+    # Detect empty partitions and separate them from partitions to unpack
+    local all_partitions=()
     local partitions_to_unpack=()
+    local empty_partitions=()
+    
     while IFS= read -r item; do
-        partitions_to_unpack+=("$item")
+        all_partitions+=("$item")
+        local part_img="${logical_dir}/${item}.img"
+        if is_empty_partition "$part_img"; then
+            empty_partitions+=("$item")
+            echo "$item" >> "$empty_partitions_file"
+            echo -e "${YELLOW}Detected empty partition: ${BOLD}${item}${RESET}"
+        else
+            partitions_to_unpack+=("$item")
+        fi
     done < <(find "$logical_dir" -maxdepth 1 -type f -name '*.img' ! -name 'super.raw.img' -exec basename {} .img \;)
 
+    # Add all partitions (including empty ones) to partition_list.txt for tracking
+    for part_name in "${all_partitions[@]}"; do
+        echo "$part_name" >> "$partition_list_file"
+    done
+
     local total=${#partitions_to_unpack[@]}
+    local empty_count=${#empty_partitions[@]}
     local current=0
     local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
     local all_successful=true
 
-    echo -e "\n${BLUE}--- Extracting content from logical partitions ---${RESET}"
-    for part_name in "${partitions_to_unpack[@]}"; do
-        current=$((current + 1))
-        local spin=0
+    if [ "$empty_count" -gt 0 ]; then
+        echo -e "\n${BLUE}Found ${BOLD}${empty_count}${RESET} empty partition(s): ${YELLOW}${empty_partitions[*]}${RESET}"
+        echo -e "${BLUE}Empty partitions will be skipped during unpack and recreated during repack.${RESET}"
+    fi
 
-        # Run the unpack in the background so we can show a spinner
-        # We redirect output to /dev/null because we only care about success or failure.
-        local quiet_flag=""
-        [ "$quiet_mode" = true ] && quiet_flag="--quiet"
-        bash "$UNPACK_SCRIPT_PATH" "${logical_dir}/${part_name}.img" "${extracted_dir}/${part_name}" --no-banner $quiet_flag >/dev/null 2>&1 &
-        local pid=$!
+    if [ "$total" -eq 0 ]; then
+        echo -e "\n${YELLOW}No non-empty partitions to unpack.${RESET}"
+    else
+        echo -e "\n${BLUE}--- Extracting content from logical partitions ---${RESET}"
+        for part_name in "${partitions_to_unpack[@]}"; do
+            current=$((current + 1))
+            local spin=0
 
-        while kill -0 $pid 2>/dev/null; do
-            echo -ne "\r\033[K${YELLOW}(${current}/${total}) Extracting: ${BOLD}${part_name}${RESET}... ${spinner[$((spin++ % 10))]}"
-            sleep 0.1
+            # Run the unpack in the background so we can show a spinner
+            # We redirect output to /dev/null because we only care about success or failure.
+            local quiet_flag=""
+            [ "$quiet_mode" = true ] && quiet_flag="--quiet"
+            bash "$UNPACK_SCRIPT_PATH" "${logical_dir}/${part_name}.img" "${extracted_dir}/${part_name}" --no-banner $quiet_flag >/dev/null 2>&1 &
+            local pid=$!
+
+            while kill -0 $pid 2>/dev/null; do
+                echo -ne "\r\033[K${YELLOW}(${current}/${total}) Extracting: ${BOLD}${part_name}${RESET}... ${spinner[$((spin++ % 10))]}"
+                sleep 0.1
+            done
+
+            wait $pid
+            if [ $? -ne 0 ]; then
+                echo -e "\r\033[K${RED}(${current}/${total}) FAILED to extract: ${BOLD}${part_name}${RESET} [✗]"
+                all_successful=false
+                break
+            else
+                echo -e "\r\033[K${GREEN}(${current}/${total}) Extracted: ${BOLD}${part_name}${RESET} [✓]"
+            fi
         done
-
-        wait $pid
-        if [ $? -ne 0 ]; then
-            echo -e "\r\033[K${RED}(${current}/${total}) FAILED to extract: ${BOLD}${part_name}${RESET} [✗]"
-            all_successful=false
-            break
-        else
-            echo -e "\r\033[K${GREEN}(${current}/${total}) Extracted: ${BOLD}${part_name}${RESET} [✓]"
-            echo "$part_name" >> "$partition_list_file"
-        fi
-    done
+    fi
 
     if [ "$all_successful" = false ]; then
         trap 'cleanup_and_exit' INT TERM EXIT
@@ -614,7 +688,11 @@ run_super_unpack_interactive() {
     trap 'cleanup_and_exit' INT TERM EXIT
     echo -e "\n${GREEN}${BOLD}Super unpack successful!${RESET}"
     echo -e "  - Project created at: ${BOLD}${project_dir}${RESET}"
-    echo -e "  - Extracted Partitions: ${BOLD}${total}${RESET} (${partitions_to_unpack[*]})"
+    local total_partitions=$((${#partitions_to_unpack[@]} + ${#empty_partitions[@]}))
+    echo -e "  - Total Partitions: ${BOLD}${total_partitions}${RESET} (${#partitions_to_unpack[@]} extracted, ${#empty_partitions[@]} empty)"
+    if [ ${#empty_partitions[@]} -gt 0 ]; then
+        echo -e "  - Empty Partitions: ${YELLOW}${empty_partitions[*]}${RESET}"
+    fi
     read -rp $'\nPress Enter to return...'
 }
 
@@ -636,22 +714,42 @@ run_super_create_config_interactive() {
     local partition_list
     readarray -t partition_list < "${metadata_dir}/partition_list.txt"
     
+    # Read empty partitions list if it exists
+    local empty_partitions_file="${metadata_dir}/empty_partitions.txt"
+    local empty_partitions=()
+    read_empty_partitions "$empty_partitions_file" empty_partitions
+    
+    # Build associative array for O(1) lookup
+    local -A empty_map
+    for empty_part in "${empty_partitions[@]}"; do
+        empty_map["$empty_part"]=1
+    done
+    
+    # Filter out empty partitions from configuration
+    local partitions_to_configure=()
+    for part_name in "${partition_list[@]}"; do
+        [ -z "${empty_map[$part_name]}" ] && partitions_to_configure+=("$part_name")
+    done
+    
+    if [ ${#empty_partitions[@]} -gt 0 ]; then
+        echo -e "\n${BLUE}Found ${BOLD}${#empty_partitions[@]}${RESET} empty partition(s): ${YELLOW}${empty_partitions[*]}${RESET}"
+        echo -e "${BLUE}Empty partitions will be skipped during configuration (they don't need filesystem settings).${RESET}"
+        read -rp $'\nPress Enter to continue...'
+    fi
+    
     declare -A config_lines
     
     local current_index=0
-    while [ "$current_index" -lt "${#partition_list[@]}" ]; do
-        local part_name=${partition_list[$current_index]}
+    while [ "$current_index" -lt "${#partitions_to_configure[@]}" ]; do
+        local part_name=${partitions_to_configure[$current_index]}
         
         local mount_method=""
-        local part_metadata_file="${project_dir}/extracted_content/${part_name}/.repack_info/metadata.txt"
-        if [ -f "$part_metadata_file" ]; then
-            source <(grep = "$part_metadata_file")
-            mount_method="$MOUNT_METHOD"
-        fi
+        load_metadata "${project_dir}/extracted_content/${part_name}/.repack_info/metadata.txt"
+        mount_method="$MOUNT_METHOD"
 
         local fs
         clear; print_banner
-        echo -e "\n${BOLD}Configuring partition ($((current_index + 1))/${#partition_list[@]}): [ ${YELLOW}$part_name${BOLD} ]${RESET}"
+        echo -e "\n${BOLD}Configuring partition ($((current_index + 1))/${#partitions_to_configure[@]}): [ ${YELLOW}$part_name${BOLD} ]${RESET}"
 
         if [ "$mount_method" == "fuse" ]; then
             echo -e "\n${YELLOW}Note: FUSE-unpack detected for '${part_name}', only EROFS is available.${RESET}"
@@ -681,7 +779,7 @@ run_super_create_config_interactive() {
 
         while true; do
             clear; print_banner
-            echo -e "\n${BOLD}Configuring partition ($((current_index + 1))/${#partition_list[@]}): [ ${YELLOW}$part_name${BOLD} ]${RESET}"
+            echo -e "\n${BOLD}Configuring partition ($((current_index + 1))/${#partitions_to_configure[@]}): [ ${YELLOW}$part_name${BOLD} ]${RESET}"
             echo -e "  - Filesystem: ${GREEN}${fs}${RESET}"
 
             if [ "$fs" == "erofs" ]; then
@@ -757,7 +855,8 @@ run_super_create_config_interactive() {
         echo "PARTITION_LIST=\"${partition_list[*]}\""
         echo ""
 
-    for part_name in "${partition_list[@]}"; do
+    # Write filesystem config only for non-empty partitions that were configured
+    for part_name in "${partitions_to_configure[@]}"; do
         echo "# Settings for ${part_name}"
         echo "${part_name^^}_FS=\"${config_lines[${part_name^^}_FS]}\""
         if [ "${config_lines[${part_name^^}_FS]}" == "erofs" ]; then
@@ -771,6 +870,15 @@ run_super_create_config_interactive() {
         fi
         echo ""
     done
+    
+    # Add comment for empty partitions if any exist
+    if [ ${#empty_partitions[@]} -gt 0 ]; then
+        echo "# Empty partitions (will be recreated as empty files during repack):"
+        for empty_part in "${empty_partitions[@]}"; do
+            echo "#   - ${empty_part}"
+        done
+        echo ""
+    fi
     } > "$final_config_file"
 
     echo -e "\n${GREEN}${BOLD}[✓] Universal repack configuration saved to: ${RESET}${final_config_file}"
@@ -816,16 +924,62 @@ run_super_repack_interactive() {
     
     mkdir -p "$logical_dir"
     
+    # Read empty partitions list if it exists
+    local empty_partitions_file="${metadata_dir}/empty_partitions.txt"
+    local empty_partitions=()
+    read_empty_partitions "$empty_partitions_file" empty_partitions
+    
+    # Build associative array for O(1) lookup
+    local -A empty_map
+    for empty_part in "${empty_partitions[@]}"; do
+        empty_map["$empty_part"]=1
+    done
+    
     set +e # Disable exit on error for the loop
-    local total=$(echo "$PARTITION_LIST" | wc -w)
+    # Filter out empty partitions from PARTITION_LIST for repacking
+    local partitions_to_repack=()
+    for part_name in $PARTITION_LIST; do
+        [ -z "${empty_map[$part_name]}" ] && partitions_to_repack+=("$part_name")
+    done
+    
+    local total=${#partitions_to_repack[@]}
+    local empty_count=${#empty_partitions[@]}
     local current=0
     local all_successful=true
 
-    echo -e "\n${BLUE}--- Repacking content into logical partitions ---${RESET}"
+    if [ "$empty_count" -gt 0 ]; then
+        echo -e "\n${BLUE}Found ${BOLD}${empty_count}${RESET} empty partition(s): ${YELLOW}${empty_partitions[*]}${RESET}"
+        echo -e "${BLUE}Empty partitions will be recreated as empty files before final assembly.${RESET}"
+    fi
 
-    for part_name in $PARTITION_LIST; do
+    if [ "$total" -eq 0 ]; then
+        echo -e "\n${YELLOW}No non-empty partitions to repack.${RESET}"
+    else
+        echo -e "\n${BLUE}--- Repacking content into logical partitions ---${RESET}"
+
+        for part_name in "${partitions_to_repack[@]}"; do
         current=$((current + 1))
         local fs_var="${part_name^^}_FS"; local fs="${!fs_var}"
+        
+        if [ -z "$fs" ]; then
+            echo -e "\n${RED}${BOLD}ERROR: Filesystem not configured for partition '${part_name}'.${RESET}"
+            echo -e "${RED}${BOLD}Please run 'Finalize Project Configuration' for this project.${RESET}"
+            all_successful=false
+            break
+        fi
+        
+        # Check mount_method to prevent FUSE + EXT4 incompatibility
+        local mount_method=""
+        load_metadata "${project_dir}/extracted_content/${part_name}/.repack_info/metadata.txt"
+        mount_method="${MOUNT_METHOD}"
+        if [ "$mount_method" == "fuse" ] && [ "$fs" == "ext4" ]; then
+            echo -e "\n${RED}${BOLD}ERROR: FUSE-based unpacking detected for partition '${part_name}'.${RESET}"
+            echo -e "${RED}${BOLD}Repacking as EXT4 is not supported for images unpacked with FUSE.${RESET}"
+            echo -e "${RED}${BOLD}Please re-run 'Finalize Project Configuration' or edit 'project.conf'.${RESET}"
+            all_successful=false
+            break
+        fi
+        
         local repack_args=("--fs" "$fs")
         if [ "$fs" == "erofs" ]; then
             local comp_var="${part_name^^}_EROFS_COMPRESSION"; local level_var="${part_name^^}_EROFS_LEVEL"
@@ -878,7 +1032,8 @@ run_super_repack_interactive() {
                 echo -e "\r\033[K${GREEN}(${current}/${total}) Repacked:  ${BOLD}${part_name}${RESET} [✓]"
             fi
         fi
-    done
+        done
+    fi
 
     if [ "$all_successful" = false ]; then
         trap 'cleanup_and_exit' INT TERM EXIT
@@ -886,22 +1041,31 @@ run_super_repack_interactive() {
         return
     fi
     
+    # Create empty partition files before final assembly
+    # Create 0-byte files, but super-tools.sh will allocate at least 4096 bytes for them in lpmake
+    if [ "$empty_count" -gt 0 ]; then
+        echo -e "\n${BLUE}--- Creating empty partition files ---${RESET}"
+        for empty_part in "${empty_partitions[@]}"; do
+            # Create 0-byte file (will be allocated 4096 bytes in lpmake command)
+            touch "${logical_dir}/${empty_part}.img"
+            echo -e "${GREEN}[✓] Created empty file: ${BOLD}${empty_part}.img${RESET}"
+        done
+    fi
+    
     echo -e "\n${BLUE}--- Assembling final super image ---${RESET}"
     
-    set -e
+    # Keep set +e active to allow error checking
     bash "$SUPER_SCRIPT_PATH" repack "$logical_dir" "$output_image" "$sparse_flag" --no-banner
+    local repack_exit_code=$?
     
-    # Check the exit code of the last command explicitly
-    if [ $? -ne 0 ]; then
-        # This block will now correctly execute if super-tools.sh fails
+    # Check the exit code explicitly
+    if [ $repack_exit_code -ne 0 ]; then
         echo -e "\n${RED}${BOLD}FATAL: Failed to assemble the final super image. Please check the errors above.${RESET}"
         # Restore the original trap and exit
         trap 'cleanup_and_exit' INT TERM EXIT
         read -rp $'\nPress Enter to return...'
         return
     fi
-
-    set +e
     
     rm -rf "$logical_dir"
     trap 'cleanup_and_exit' INT TERM EXIT
@@ -970,10 +1134,8 @@ run_non_interactive() {
         if [ -z "$source_dir" ] || [ -z "$output_image" ] || [ -z "$fs" ]; then echo -e "${RED}Error: SOURCE_DIR/OUTPUT_IMAGE/FILESYSTEM not set.${RESET}"; exit 1; fi
         
         local mount_method=""
-        if [ -f "${source_dir}/.repack_info/metadata.txt" ]; then
-            source <(grep = "${source_dir}/.repack_info/metadata.txt")
-            mount_method="${MOUNT_METHOD}"
-        fi
+        load_metadata "${source_dir}/.repack_info/metadata.txt"
+        mount_method="${MOUNT_METHOD}"
         if [ "$mount_method" == "fuse" ] && [ "$fs" == "ext4" ]; then
             echo -e "\n${RED}${BOLD}ERROR: FUSE-based unpacking detected for '${source_dir}'.${RESET}" >&2
             echo -e "${RED}${BOLD}Repacking as EXT4 is not supported for images unpacked with FUSE.${RESET}" >&2
@@ -1029,14 +1191,37 @@ run_non_interactive() {
         # Mirror the interactive logic        
         mkdir -p "$project_dir/.metadata" "$project_dir/logical_partitions" "$project_dir/extracted_content"
         bash "$SUPER_SCRIPT_PATH" unpack "$input_image" "$project_dir/logical_partitions" --no-banner &>/dev/null
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}${BOLD}Error: Failed to unpack super image.${RESET}" >&2
+            exit 1
+        fi
         
-        find "$project_dir/logical_partitions" -maxdepth 1 -type f -name '*.img' ! -name 'super.raw.img' | while read -r logical_img; do
+        local metadata_dir="$project_dir/.metadata"
+        local partition_list_file="${metadata_dir}/partition_list.txt"
+        local empty_partitions_file="${metadata_dir}/empty_partitions.txt"
+        touch "$partition_list_file" "$empty_partitions_file"
+        
+        # Collect all partition images first (avoid subshell issues)
+        local all_partition_images=()
+        while IFS= read -r logical_img; do
+            all_partition_images+=("$logical_img")
+        done < <(find "$project_dir/logical_partitions" -maxdepth 1 -type f -name '*.img' ! -name 'super.raw.img')
+        
+        # Detect empty partitions and separate them
+        for logical_img in "${all_partition_images[@]}"; do
             local part_name
             part_name=$(basename "$logical_img" .img)
-            echo -e "--- Unpacking logical partition: ${part_name} ---"
-            local quiet_flag=""
-            [ "$quiet_mode" = true ] && quiet_flag="--quiet"
-            bash "$UNPACK_SCRIPT_PATH" "$logical_img" "$project_dir/extracted_content/${part_name}" --no-banner $quiet_flag &>/dev/null
+            echo "$part_name" >> "$partition_list_file"
+            
+            if is_empty_partition "$logical_img"; then
+                echo "$part_name" >> "$empty_partitions_file"
+                echo -e "${YELLOW}Detected empty partition: ${BOLD}${part_name}${RESET}"
+            else
+                echo -e "--- Unpacking logical partition: ${part_name} ---"
+                local quiet_flag=""
+                [ "$quiet_mode" = true ] && quiet_flag="--quiet"
+                bash "$UNPACK_SCRIPT_PATH" "$logical_img" "$project_dir/extracted_content/${part_name}" --no-banner $quiet_flag &>/dev/null
+            fi
         done
         rm -rf "$project_dir/logical_partitions"
         echo -e "\n${GREEN}${BOLD}Success: Super image unpacked to $project_dir${RESET}"
@@ -1053,17 +1238,37 @@ run_non_interactive() {
         echo -e "\n${BOLD}Super Repack Summary:${RESET}\n  - ${YELLOW}Project:${RESET} $project_name\n  - ${YELLOW}Output Image:${RESET} $output_image"
         echo -e "\n${RED}${BOLD}Starting super repack...${RESET}"
         
-        local logical_dir="${project_dir}/logical_partitions"; mkdir -p "$logical_dir"
+        local logical_dir="${project_dir}/logical_partitions"
+        local metadata_dir="${project_dir}/.metadata"
+        mkdir -p "$logical_dir"
         
+        # Read empty partitions list if it exists
+        local empty_partitions_file="${metadata_dir}/empty_partitions.txt"
+        local empty_partitions=()
+        read_empty_partitions "$empty_partitions_file" empty_partitions
+        
+        # Build associative array for O(1) lookup
+        local -A empty_map
+        for empty_part in "${empty_partitions[@]}"; do
+            empty_map["$empty_part"]=1
+        done
+        
+        # Filter out empty partitions and repack only non-empty ones
+        local repack_failed=false
         for part_name in $PARTITION_LIST; do
+            [ -n "${empty_map[$part_name]}" ] && continue
+
             local fs_var="${part_name^^}_FS"; local fs="${!fs_var}"
 
-            local mount_method=""
-            local part_metadata_file="$project_dir/extracted_content/${part_name}/.repack_info/metadata.txt"
-            if [ -f "$part_metadata_file" ]; then
-                source <(grep = "$part_metadata_file")
-                mount_method="$MOUNT_METHOD"
+            if [ -z "$fs" ]; then
+                echo -e "\n${RED}${BOLD}ERROR: Filesystem not configured for partition '${part_name}'.${RESET}" >&2
+                echo -e "${RED}${BOLD}Please run 'Finalize Project Configuration' for this project.${RESET}" >&2
+                exit 1
             fi
+
+            local mount_method=""
+            load_metadata "$project_dir/extracted_content/${part_name}/.repack_info/metadata.txt"
+            mount_method="$MOUNT_METHOD"
             if [ "$mount_method" == "fuse" ] && [ "$fs" == "ext4" ]; then
                 echo -e "\n${RED}${BOLD}ERROR: FUSE-based unpacking detected for partition '${part_name}'.${RESET}" >&2
                 echo -e "${RED}${BOLD}Repacking as EXT4 is not supported for images unpacked with FUSE.${RESET}" >&2
@@ -1083,12 +1288,59 @@ run_non_interactive() {
                     repack_args+=("--ext4-overhead-percent" "${!percent_var}")
                 fi
             fi
-            bash "$REPACK_SCRIPT_PATH" "$project_dir/extracted_content/${part_name}" "$logical_dir/${part_name}.img" "${repack_args[@]}" --no-banner $quiet_flag &>/dev/null
+            
+            # Use project config ENABLE_VERBOSE_LOGS first, then fallback to command line quiet_mode
+            local use_verbose_logs="${ENABLE_VERBOSE_LOGS:-false}"
+            if [ "$use_verbose_logs" != "true" ] && [ "$quiet_mode" = true ]; then
+                use_verbose_logs="false"
+            fi
+            
+            local quiet_flag=""
+            [ "$quiet_mode" = true ] && quiet_flag="--quiet"
+            
+            if [ "$use_verbose_logs" == "true" ]; then
+                # Verbose mode: show output
+                echo -e "\n${YELLOW}--- Repacking: ${BOLD}${part_name}${RESET} ---${RESET}"
+                bash "$REPACK_SCRIPT_PATH" "$project_dir/extracted_content/${part_name}" "$logical_dir/${part_name}.img" "${repack_args[@]}" --no-banner $quiet_flag
+            else
+                # Quiet mode: suppress output
+                bash "$REPACK_SCRIPT_PATH" "$project_dir/extracted_content/${part_name}" "$logical_dir/${part_name}.img" "${repack_args[@]}" --no-banner $quiet_flag &>/dev/null
+            fi
+            
+            if [ $? -ne 0 ]; then
+                if [ "$use_verbose_logs" == "true" ]; then
+                    echo -e "${RED}--- [✗] FAILED: ${BOLD}${part_name}${RESET} repack failed. See logs above. ---${RESET}" >&2
+                else
+                    echo -e "${RED}${BOLD}ERROR: Failed to repack partition '${part_name}'.${RESET}" >&2
+                fi
+                repack_failed=true
+                break
+            fi
         done
+        
+        if [ "$repack_failed" = true ]; then
+            rm -rf "$logical_dir"
+            exit 1
+        fi
+
+        # Create empty partition files before final assembly
+        # Create 0-byte files, but super-tools.sh will allocate at least 4096 bytes for them in lpmake
+        if [ ${#empty_partitions[@]} -gt 0 ]; then
+            echo "--- Creating empty partition files ---"
+            for empty_part in "${empty_partitions[@]}"; do
+                # Create 0-byte file (will be allocated 4096 bytes in lpmake command)
+                touch "${logical_dir}/${empty_part}.img"
+            done
+        fi
 
         echo "--- Assembling final super image ---"
         local sparse_flag=""; [ "${CONFIG[CREATE_SPARSE_IMAGE]}" == "false" ] && sparse_flag="--raw"
         bash "$SUPER_SCRIPT_PATH" repack "$logical_dir" "$output_image" "$sparse_flag" --no-banner &>/dev/null
+        if [ $? -ne 0 ]; then
+            echo -e "\n${RED}${BOLD}ERROR: Failed to assemble final super image.${RESET}" >&2
+            rm -rf "$logical_dir"
+            exit 1
+        fi
         rm -rf "$logical_dir"
         
         echo -e "\n${GREEN}${BOLD}Success: Final image created at: ${output_image}${RESET}"

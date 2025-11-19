@@ -234,6 +234,11 @@ run_repack() {
             fi
             local size
             size=$(stat -c%s "$part_img")
+            # If partition is empty (0 bytes), allocate at least 4096 bytes (one block) for lpmake
+            # The file itself remains 0 bytes, but lpmake needs at least one block
+            if [ "$size" -eq 0 ]; then
+                size=4096
+            fi
             current_partition_sizes[$part]=$size
             total_group_size=$((total_group_size + size))
         done

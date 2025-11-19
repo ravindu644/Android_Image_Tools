@@ -103,6 +103,22 @@ if [ ! -f "$IMAGE_FILE" ]; then
   exit 1
 fi
 
+# Check if image is empty (0 bytes or all zeros)
+if [ "$(stat -c%s "$IMAGE_FILE" 2>/dev/null)" -eq 0 ] || file "$IMAGE_FILE" 2>/dev/null | grep -q "empty"; then
+  echo -e "${YELLOW}${BOLD}Warning: Image file '$IMAGE_FILE' is empty (0 bytes).${RESET}"
+  echo -e "${YELLOW}Empty partitions cannot be unpacked. Skipping...${RESET}"
+  mkdir -p "$EXTRACT_DIR" "$REPACK_INFO"
+  {
+    echo "UNPACK_TIME=$(date +%s)"
+    echo "SOURCE_IMAGE=$IMAGE_FILE"
+    echo "FILESYSTEM_TYPE=empty"
+    echo "MOUNT_METHOD=none"
+    echo "IS_EMPTY_PARTITION=true"
+  } > "${REPACK_INFO}/metadata.txt"
+  [ "$INTERACTIVE_MODE" = true ] && echo -e "${GREEN}${BOLD}[✓] Empty partition marker created.${RESET}"
+  exit 0
+fi
+
 # Add show_progress function before cleanup()
 show_progress() {
     local pid=$1
