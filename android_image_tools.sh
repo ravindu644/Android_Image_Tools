@@ -565,10 +565,14 @@ run_repack_interactive() {
                         if [ $sparse_exit_code -eq 0 ]; then
                             rm -f "$output_image"
                             final_image_path="$sparse_output"
+                            # Transfer ownership to actual user
+                            [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$final_image_path"
                         else
                             echo -e "${YELLOW}Warning: Sparse conversion failed, keeping raw image.${RESET}"
                         fi
                     fi
+                    # Ensure ownership is correct even if sparse conversion was skipped
+                    [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$final_image_path"
                     echo -e "${GREEN}${BOLD}Repack successful. Final image created at: ${final_image_path}${RESET}"
                     display_final_image_size "$final_image_path"
                 else
@@ -1097,6 +1101,9 @@ run_super_repack_interactive() {
     rm -rf "$logical_dir"
     trap 'cleanup_and_exit' INT TERM EXIT
     
+    # Transfer ownership to actual user
+    [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$output_image"
+    
     echo -e "\n${GREEN}${BOLD}Super repack successful!${RESET}"
     echo -e "  - Final image: ${BOLD}$output_image${RESET}"
     display_final_image_size "$output_image"
@@ -1196,6 +1203,8 @@ run_non_interactive() {
             if [ "$create_sparse" == "true" ]; then
                 local sparse_output="${output_image%.img}.sparse.img"; echo -e "\n${BLUE}Creating sparse image...${RESET}"; img2simg "$output_image" "$sparse_output"; rm -f "$output_image"; final_image_path="$sparse_output"
             fi
+            # Transfer ownership to actual user
+            [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$final_image_path"
             echo -e "\n${GREEN}${BOLD}Success: Final image created at: ${final_image_path}${RESET}"
             display_final_image_size "$final_image_path"
         else
@@ -1374,6 +1383,9 @@ run_non_interactive() {
             exit 1
         fi
         rm -rf "$logical_dir"
+        
+        # Transfer ownership to actual user
+        [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$output_image"
         
         echo -e "\n${GREEN}${BOLD}Success: Final image created at: ${output_image}${RESET}"
         display_final_image_size "$output_image"

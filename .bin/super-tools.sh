@@ -287,6 +287,11 @@ run_repack() {
     
     eval "$cmd"
     
+    # Transfer ownership to actual user if running under sudo
+    if [ -n "$SUDO_USER" ] && [ -f "$output_image" ]; then
+        chown "$SUDO_USER:$SUDO_USER" "$output_image"
+    fi
+    
     echo -e "\n${GREEN}${BOLD}Repack successful!${RESET}"
 }
 

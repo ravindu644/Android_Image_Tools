@@ -353,15 +353,17 @@ verify_modifications() {
 show_copy_progress() {
     local src="$1"
     local dst="$2"
-    local total_size=$(du -sb "$src" | cut -f1)
+    local total_size=$(du -sb "$src" 2>/dev/null | cut -f1)
     local spin=0
     local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
 
     while kill -0 $! 2>/dev/null; do
-        current_size=$(du -sb "$dst" | cut -f1)
-        percentage=$((current_size * 100 / total_size))
-        current_hr=$(numfmt --to=iec-i --suffix=B "$current_size")
-        total_hr=$(numfmt --to=iec-i --suffix=B "$total_size")
+        # Suppress errors from du - rsync creates temporary files that may be renamed during copy
+        current_size=$(du -sb "$dst" 2>/dev/null | cut -f1 || echo "0")
+        [ -z "$current_size" ] && current_size=0
+        [ "$current_size" -gt 0 ] && [ "$total_size" -gt 0 ] && percentage=$((current_size * 100 / total_size)) || percentage=0
+        current_hr=$(numfmt --to=iec-i --suffix=B "$current_size" 2>/dev/null || echo "0B")
+        total_hr=$(numfmt --to=iec-i --suffix=B "$total_size" 2>/dev/null || echo "0B")
         
         # Clear entire line with \033[K before printing
         if [ "$QUIET" = false ]; then echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Copying to work directory: ${percentage}% (${current_hr}/${total_hr})${RESET}"; fi
