@@ -360,4 +360,4 @@ case "$ACTION" in
         ;;
 esac
 
-echo -e "\n${GREEN}${BOLD}Done!${RESET}"
+echo -e "\n${GREEN}${BOLD}Done!${RESET}\n"

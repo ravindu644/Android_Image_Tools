@@ -464,10 +464,17 @@ run_unpack_interactive() {
                 trap '' INT
                 local quiet_flag=""
                 [ "$quiet_mode" = true ] && quiet_flag="--quiet"
-                set -e; bash "$UNPACK_SCRIPT_PATH" "$input_image" "$output_dir" --no-banner $quiet_flag; set +e
+                set +e  # Disable exit on error to check exit code
+                bash "$UNPACK_SCRIPT_PATH" "$input_image" "$output_dir" --no-banner $quiet_flag
+                local unpack_exit_code=$?
+                set -e  # Re-enable exit on error
                 trap 'cleanup_and_exit' INT TERM EXIT
                 
-                echo -e "\n${GREEN}${BOLD}Unpack successful. Files are in: $output_dir${RESET}"
+                if [ $unpack_exit_code -ne 0 ]; then
+                    echo -e "\n${RED}${BOLD}Unpack failed. Please check the errors above.${RESET}"
+                else
+                    echo -e "\n${GREEN}${BOLD}Unpack successful. Files are in: $output_dir${RESET}"
+                fi
                 read -rp $'\nPress Enter to return...'
                 break
                 ;;
@@ -540,16 +547,33 @@ run_repack_interactive() {
                 
                 local quiet_flag=""
                 [ "$quiet_mode" = true ] && quiet_flag="--quiet"
-                set -e; bash "$REPACK_SCRIPT_PATH" "$source_dir" "$output_image" "${repack_args[@]}" --no-banner $quiet_flag; set +e; trap 'cleanup_and_exit' INT TERM EXIT; echo
+                set +e  # Disable exit on error to check exit code
+                bash "$REPACK_SCRIPT_PATH" "$source_dir" "$output_image" "${repack_args[@]}" --no-banner $quiet_flag
+                local repack_exit_code=$?
+                set -e  # Re-enable exit on error
+                trap 'cleanup_and_exit' INT TERM EXIT
                 
                 local final_image_path="$output_image"
-                if [ -f "$output_image" ]; then
+                if [ $repack_exit_code -eq 0 ] && [ -f "$output_image" ]; then
                     if [ "$create_sparse" = true ]; then
-                        local sparse_output="${output_image%.img}.sparse.img"; echo -e "\n${BLUE}Converting to sparse image...${RESET}"; set -e; img2simg "$output_image" "$sparse_output"; set +e; rm -f "$output_image"; final_image_path="$sparse_output"
+                        local sparse_output="${output_image%.img}.sparse.img"
+                        echo -e "\n${BLUE}Converting to sparse image...${RESET}"
+                        set +e  # Disable exit on error for sparse conversion
+                        img2simg "$output_image" "$sparse_output"
+                        local sparse_exit_code=$?
+                        set -e  # Re-enable exit on error
+                        if [ $sparse_exit_code -eq 0 ]; then
+                            rm -f "$output_image"
+                            final_image_path="$sparse_output"
+                        else
+                            echo -e "${YELLOW}Warning: Sparse conversion failed, keeping raw image.${RESET}"
+                        fi
                     fi
                     echo -e "${GREEN}${BOLD}Repack successful. Final image created at: ${final_image_path}${RESET}"
                     display_final_image_size "$final_image_path"
-                else echo -e "\n${RED}${BOLD}Repack failed.${RESET}"; fi
+                else
+                    echo -e "\n${RED}${BOLD}Repack failed. Please check the errors above.${RESET}"
+                fi
                 read -rp $'\nPress Enter to return...'; break;;
         esac
     done
@@ -635,13 +659,13 @@ run_super_unpack_interactive() {
 
     if [ "$empty_count" -gt 0 ]; then
         echo -e "\n${BLUE}Found ${BOLD}${empty_count}${RESET} empty partition(s): ${YELLOW}${empty_partitions[*]}${RESET}"
-        echo -e "${BLUE}Empty partitions will be skipped during unpack and recreated during repack.${RESET}"
+        echo -e "${BLUE}Empty partitions will be skipped during unpack and recreated during repack.${RESET}\n"
     fi
 
     if [ "$total" -eq 0 ]; then
         echo -e "\n${YELLOW}No non-empty partitions to unpack.${RESET}"
     else
-        echo -e "\n${BLUE}--- Extracting content from logical partitions ---${RESET}"
+        echo -e "${BLUE}--- Extracting content from logical partitions ---${RESET}"
         for part_name in "${partitions_to_unpack[@]}"; do
             current=$((current + 1))
             local spin=0
@@ -1224,6 +1248,11 @@ run_non_interactive() {
                 local quiet_flag=""
                 [ "$quiet_mode" = true ] && quiet_flag="--quiet"
                 bash "$UNPACK_SCRIPT_PATH" "$logical_img" "$project_dir/extracted_content/${part_name}" --no-banner $quiet_flag &>/dev/null
+                if [ $? -ne 0 ]; then
+                    echo -e "${RED}${BOLD}Error: Failed to unpack partition '${part_name}'.${RESET}" >&2
+                    rm -rf "$project_dir/logical_partitions"
+                    exit 1
+                fi
             fi
         done
         rm -rf "$project_dir/logical_partitions"
