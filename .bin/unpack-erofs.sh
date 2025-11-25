@@ -560,16 +560,20 @@ echo -e "${BLUE}└─ Target: ${EXTRACT_DIR}${RESET}"
 # Calculate total size for progress
 total_size=$(du -sb "$MOUNT_DIR" | cut -f1)
 
-# Copy files using rsync (handles symlinks, hidden files, etc. better than tar)
-# We preserve attributes separately via restore_attributes() during repack
-if [ "$INTERACTIVE_MODE" = true ]; then
-    # Interactive mode: Use custom progress spinner
-    rsync -a --no-owner --no-group "$MOUNT_DIR/" "$EXTRACT_DIR/" 2>/dev/null &
+if [ "$INTERACTIVE_MODE" = true ] && command -v pv >/dev/null 2>&1; then
+    # Interactive mode with pv: Show progress bar.
+    (cd "$MOUNT_DIR" && tar -cf - .) | \
+    pv -s "$total_size" -N "Copying" | \
+    (cd "$EXTRACT_DIR" && tar -xf -)
+elif [ "$INTERACTIVE_MODE" = true ]; then
+    # Interactive mode without pv: Use custom spinner.
+    (cd "$MOUNT_DIR" && tar -cf - .) | \
+    (cd "$EXTRACT_DIR" && tar -xf -) & 
     show_progress $! "$EXTRACT_DIR" "$total_size"
     wait $!
 else
-    # Non-interactive (quiet) mode: No progress indicators
-    rsync -a --no-owner --no-group "$MOUNT_DIR/" "$EXTRACT_DIR/" >/dev/null 2>&1
+    # Non-interactive (quiet) mode: No progress indicators.
+    (cd "$MOUNT_DIR" && tar -cf - .) | (cd "$EXTRACT_DIR" && tar -xf -)
 fi
 
 # Verify copy succeeded

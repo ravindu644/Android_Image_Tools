@@ -386,16 +386,17 @@ prepare_working_directory() {
     [ -d "$WORK_DIR" ] && rm -rf "$WORK_DIR"
     mkdir -p "$WORK_DIR"
     
-    # Copy files using rsync (handles symlinks, hidden files, etc. better than tar)
-    # We handle permissions/contexts separately via restore_attributes()
+    # Copy with SELinux contexts and progress
     echo -e "${BLUE}Copying files to work directory...${RESET}"
-    rsync -a --exclude='.repack_info' --no-owner --no-group "$EXTRACT_DIR/" "$WORK_DIR/" 2>/dev/null &
+    (cd "$EXTRACT_DIR" && tar -cf - .) | (cd "$WORK_DIR" && tar -xf -) &
     show_copy_progress "$EXTRACT_DIR" "$WORK_DIR"
     wait $!
+    copy_exit=$?
     
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}Error: Failed to copy files with attributes${RESET}"
-        cleanup ERROR
+    if [ $copy_exit -ne 0 ]; then
+        echo -e "${RED}Error: Failed to copy files to work directory${RESET}"
+        cleanup
+        exit 1
     fi
     
     verify_modifications "$WORK_DIR"
@@ -455,8 +456,8 @@ create_ext4_image_strict() {
     eval "$mkfs_cmd $output_img"
 }
 
-# Check if rsync failed due to space issues
-check_rsync_space_error() {
+# Check if tar pipe failed due to space issues
+check_tar_space_error() {
     local exit_code="$1"
     local log_file="$2"
     
@@ -464,15 +465,20 @@ check_rsync_space_error() {
         return 1  # No error
     fi
     
-    # Check log for space-related errors
-    if grep -qi "No space left on device\|write failed\|failed to set\|error.*space\|ENOSPC" "$log_file" 2>/dev/null; then
-        return 0  # Space error detected
+    # Check log file for space-related errors
+    if [ -n "$log_file" ] && [ -f "$log_file" ]; then
+        if grep -qi "No space left on device\|write failed\|failed to set\|error.*space\|ENOSPC\|tar:.*: No space left\|tar:.*: Cannot write" "$log_file" 2>/dev/null; then
+            return 0  # Space error detected
+        fi
     fi
     
-    # Check exit codes that often indicate space issues
-    if [ "$exit_code" -eq 11 ] || [ "$exit_code" -eq 23 ]; then
-        if grep -qi "No space\|space left" "$log_file" 2>/dev/null; then
-            return 0  # Space error detected
+    # If exit code is 1 and we have a log file, check for common space-related patterns
+    if [ "$exit_code" -eq 1 ]; then
+        # Check if destination is full
+        if [ -n "$log_file" ] && [ -f "$log_file" ]; then
+            if grep -qi "write error\|cannot create\|failed to write" "$log_file" 2>/dev/null; then
+                return 0  # Likely space error
+            fi
         fi
     fi
     
@@ -858,23 +864,25 @@ case $FS_CHOICE in
         fi
         
         echo -e "\n${BLUE}Copying files to final image...${RESET}"
-        rsync_log_file=$(mktemp)
+        tar_log_file=$(mktemp)
         set +e  # Disable exit on error to catch copy failures
-        # Hide rsync output - we'll show a cleaner message if it fails
-        rsync -a --exclude='.repack_info' --no-owner --no-group "$EXTRACT_DIR/" "$MOUNT_POINT/" >"$rsync_log_file" 2>&1
+        (cd "$EXTRACT_DIR" && tar --exclude=.repack_info -cf - .) 2>>"$tar_log_file" | (cd "$MOUNT_POINT" && tar -xf -) 2>>"$tar_log_file" &
+        tar_pid=$!
+        show_copy_progress "$EXTRACT_DIR" "$MOUNT_POINT"
+        wait $tar_pid
         copy_exit_code=$?
         set -e  # Re-enable exit on error
         
         # Check if copy failed due to space issues
         copy_failed=false
-        if check_rsync_space_error "$copy_exit_code" "$rsync_log_file"; then
+        if check_tar_space_error "$copy_exit_code" "$tar_log_file"; then
             copy_failed=true
         fi
         
         # If strict mode copy failed due to space, fall back to resize approach
         if [ "$copy_failed" = true ] && [ "$EXT4_MODE" == "strict" ] && [ "$ORIGINAL_HAS_SHARED_BLOCKS" != "true" ]; then
-            echo -e "${YELLOW}Copy failed due to insufficient space.${RESET}"
-            echo -e "${YELLOW}Using generic resize method to create image...${RESET}\n"
+            echo -e "\n${YELLOW}${BOLD}Warning: Copy failed due to insufficient space in strict mode.${RESET}"
+            echo -e "${YELLOW}This can happen due to block allocation differences. Falling back to resize approach...${RESET}\n"
             
             # Unmount and remove the failed image
             sync && umount "$MOUNT_POINT" 2>/dev/null || true
@@ -891,22 +899,33 @@ case $FS_CHOICE in
             # Retry copying with the larger image
             echo -e "${BLUE}  - Copying files to temporary image...${RESET}"
             set +e  # Disable exit on error to check result
-            rsync -a --exclude='.repack_info' --no-owner --no-group "$EXTRACT_DIR/" "$MOUNT_POINT/" 2>/dev/null &
+            (cd "$EXTRACT_DIR" && tar --exclude=.repack_info -cf - .) 2>/dev/null | (cd "$MOUNT_POINT" && tar -xf -) 2>/dev/null &
+            fallback_tar_pid=$!
             show_copy_progress "$EXTRACT_DIR" "$MOUNT_POINT"
-            wait $!
+            wait $fallback_tar_pid
             fallback_copy_exit=$?
             set -e  # Re-enable exit on error
             
             if [ $fallback_copy_exit -ne 0 ]; then
                 echo -e "\n${RED}${BOLD}Error: Copy failed even with larger image.${RESET}"
                 umount "$MOUNT_POINT" 2>/dev/null || true
-                rm -f "$OUTPUT_IMG" "$rsync_log_file"
+                rm -f "$OUTPUT_IMG" "$tar_log_file"
                 exit 1
             fi
+        elif [ "$copy_exit_code" -ne 0 ] && [ "$copy_failed" != true ]; then
+            # Other error (not space-related)
+            echo -e "\n${RED}${BOLD}Error: Copy failed.${RESET}"
+            if [ -f "$tar_log_file" ]; then
+                echo -e "${RED}Error details:${RESET}"
+                tail -20 "$tar_log_file"
+            fi
+            umount "$MOUNT_POINT" 2>/dev/null || true
+            rm -f "$OUTPUT_IMG" "$tar_log_file"
+            exit 1
         fi
         
         # Cleanup temp log file
-        rm -f "$rsync_log_file"
+        rm -f "$tar_log_file"
         
         # Verify and restore attributes (for both successful first try and fallback)
         verify_modifications "$MOUNT_POINT"
@@ -920,11 +939,9 @@ case $FS_CHOICE in
         if [ "$EXT4_MODE" == "strict" ]; then
             if [ "$ORIGINAL_HAS_SHARED_BLOCKS" == "true" ] || [ "$copy_failed" = true ]; then
                 echo -e "${BLUE}  - Finalizing optimized image...${RESET}"
-                set +e  # Disable exit on error for resize operations
                 e2fsck -fy "$OUTPUT_IMG" >/dev/null 2>&1
                 echo -e "${BLUE}  - Resizing filesystem to minimum possible size...${RESET}"
                 resize2fs -M "$OUTPUT_IMG" >/dev/null 2>&1
-                set -e  # Re-enable exit on error
             fi
         fi
         
