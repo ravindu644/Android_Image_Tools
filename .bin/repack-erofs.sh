@@ -242,11 +242,12 @@ restore_attributes() {
         processed=$((processed + 1))
         percentage=$((processed * 100 / DIR_COUNT))
         rel_path=${item#$1}
+        rel_path_escaped=$(printf '%s' "$rel_path" | sed 's/[.[\*^$()+?{|}]/\\&/g')
         [ -z "$rel_path" ] && rel_path="/"
         
         # Use awk for robust parsing
-        stored_attrs=$(grep -E "^${rel_path} " "$FS_CONFIG_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
-        stored_context=$(grep -E "^${rel_path} " "$FILE_CONTEXTS_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
+        stored_attrs=$(grep -E "^${rel_path_escaped} " "$FS_CONFIG_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
+        stored_context=$(grep -E "^${rel_path_escaped} " "$FILE_CONTEXTS_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
 
         if [ -z "$stored_attrs" ]; then
             # New directory: find attributes from the closest known ancestor
@@ -285,9 +286,10 @@ restore_attributes() {
         processed=$((processed + 1))
         percentage=$((processed * 100 / FILE_COUNT))
         rel_path=${item#$1}
+        rel_path_escaped=$(printf '%s' "$rel_path" | sed 's/[.[\*^$()+?{|}]/\\&/g')
         
-        stored_attrs=$(grep -E "^${rel_path} " "$FS_CONFIG_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
-        stored_context=$(grep -E "^${rel_path} " "$FILE_CONTEXTS_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
+        stored_attrs=$(grep -E "^${rel_path_escaped} " "$FS_CONFIG_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
+        stored_context=$(grep -E "^${rel_path_escaped} " "$FILE_CONTEXTS_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
 
         if [ -z "$stored_attrs" ]; then
             # New file: find ownership/context from the closest known ancestor
