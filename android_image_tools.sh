@@ -671,9 +671,9 @@ run_super_unpack_interactive() {
     # Show concise message about empty partitions
     if [ "$empty_count" -gt 0 ]; then
         if [ "$is_virtual_ab" = true ]; then
-            echo -e "\n${BLUE}Detected virtual A/B layout with ${BOLD}${empty_count}${RESET} empty slot partitions (normal for virtual-AB).${RESET}\n"
+            echo -e "${BLUE}Detected virtual A/B layout with ${BOLD}${empty_count}${RESET} empty slot partitions (normal for virtual-AB).${RESET}\n"
         else
-            echo -e "\n${BLUE}Found ${BOLD}${empty_count}${RESET} empty partition(s). They will be skipped during unpack and recreated during repack.${RESET}\n"
+            echo -e "${BLUE}Found ${BOLD}${empty_count}${RESET} empty partition(s). They will be skipped during unpack and recreated during repack.${RESET}\n"
         fi
     fi
 
@@ -1289,9 +1289,9 @@ run_non_interactive() {
         # Show concise message about empty partitions
         if [ "$empty_count" -gt 0 ]; then
             if [ "$is_virtual_ab" = true ]; then
-                echo -e "\n${BLUE}Detected virtual A/B layout with ${BOLD}${empty_count}${RESET} empty slot partitions (normal for virtual-AB).${RESET}"
+                echo -e "${BLUE}Detected virtual A/B layout with ${BOLD}${empty_count}${RESET} empty slot partitions (normal for virtual-AB).${RESET}"
             else
-                echo -e "\n${BLUE}Found ${BOLD}${empty_count}${RESET} empty partition(s). They will be skipped during unpack and recreated during repack.${RESET}"
+                echo -e "${BLUE}Found ${BOLD}${empty_count}${RESET} empty partition(s). They will be skipped during unpack and recreated during repack.${RESET}"
             fi
         fi
         rm -rf "$project_dir/logical_partitions"
