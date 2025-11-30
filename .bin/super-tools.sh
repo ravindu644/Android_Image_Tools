@@ -92,9 +92,22 @@ parse_lpdump_and_save_config() {
     local super_device_size
     super_device_size=$(awk '/Block device table:/,EOF {if ($1 == "Size:") {print $2; exit}}' "$lpdump_file")
 
+    # Detect virtual-ab flag from header flags
+    local virtual_ab_flag="false"
+    if grep -q "Header flags:.*virtual_ab_device" "$lpdump_file"; then
+        virtual_ab_flag="true"
+        echo -e "${BLUE}Detected virtual A/B partition layout.${RESET}"
+    fi
+
+    # Validate metadata slots
+    local metadata_slots
+    metadata_slots=$(grep -m 1 "Metadata slot count:" "$lpdump_file" | awk '{print $NF}')
+    [ -z "$metadata_slots" ] && { echo -e "${RED}Error: Could not determine metadata slot count.${RESET}"; exit 1; }
+
     echo "# Repack config for super image, generated on $(date)" > "$config_file"
-    echo "METADATA_SLOTS=$(grep -m 1 "Metadata slot count:" "$lpdump_file" | awk '{print $NF}')" >> "$config_file"
+    echo "METADATA_SLOTS=$metadata_slots" >> "$config_file"
     echo "SUPER_DEVICE_SIZE=$super_device_size" >> "$config_file"
+    echo "VIRTUAL_AB=$virtual_ab_flag" >> "$config_file"
 
     awk '
         /Partition table:/ { in_partition_table=1; next }
@@ -120,6 +133,29 @@ parse_lpdump_and_save_config() {
             for (group_name in partitions_in_group) {
                 sub(/^ /, "", partitions_in_group[group_name])
                 printf "LP_GROUP_%s_PARTITIONS=\"%s\"\n", group_name, partitions_in_group[group_name]
+            }
+        }
+    ' "$lpdump_file" >> "$config_file"
+
+    # Parse group sizes from Group table
+    awk '
+        /Group table:/ { in_group_table=1; next }
+        /^$/ && in_group_table && group_found { in_group_table=0 }
+        /Block device table:/ { in_group_table=0 }
+
+        in_group_table {
+            if ($1 == "Name:") { 
+                current_group = $2
+                group_found = 1
+            }
+            if ($1 == "Maximum" && $2 == "size:") {
+                # Extract size (remove "bytes" suffix if present)
+                size = $3
+                gsub(/bytes/, "", size)
+                gsub(/,/, "", size)  # Remove commas if present
+                if (current_group != "" && size != "" && size != "0") {
+                    printf "LP_GROUP_%s_SIZE=%s\n", current_group, size
+                }
             }
         }
     ' "$lpdump_file" >> "$config_file"
@@ -213,54 +249,101 @@ run_repack() {
     echo -e "\n${BLUE}Starting repack process using partitions from: ${BOLD}${session_dir}${RESET}"
     source "$config_file"
 
+    # Set default virtual-ab flag if not present in config (for backward compatibility)
+    VIRTUAL_AB="${VIRTUAL_AB:-false}"
+
     local cmd="lpmake"
     cmd+=" --metadata-size 65536"
     cmd+=" --super-name super"
     cmd+=" --metadata-slots ${METADATA_SLOTS}"
     cmd+=" --device super:${SUPER_DEVICE_SIZE}"
     
-    echo -e "\n${BLUE}Calculating new partition sizes and building command...${RESET}"
+    # Add virtual-ab flag if detected
+    if [ "$VIRTUAL_AB" = "true" ]; then
+        cmd+=" --virtual-ab"
+        echo -e "${BLUE}Using virtual A/B partition layout (groups share physical space).${RESET}"
+    fi
     
+    echo -e "\n${BLUE}Calculating new partition sizes and building command...${RESET}"
+
     if [ -z "$LP_GROUPS" ]; then
         echo -e "${RED}Error: No partition groups found in config file. Nothing to repack.${RESET}"
         exit 1
     fi
 
-    local total_partitions_size=0
+    # Collect partition sizes and calculate group sizes
+    declare -A partition_sizes
+    declare -A group_sizes
 
     for group in $LP_GROUPS; do
         local group_partitions_var="LP_GROUP_${group}_PARTITIONS"
         local partitions="${!group_partitions_var}"
-        
-        if [ -z "$partitions" ]; then continue; fi
+        [ -z "$partitions" ] && continue
 
         local total_group_size=0
-        declare -A current_partition_sizes
-        
+        local saved_group_size_var="LP_GROUP_${group}_SIZE"
+        local saved_group_size="${!saved_group_size_var}"
+
+        # Calculate partition sizes and group size
         for part in $partitions; do
             local part_img="${session_dir}/${part}.img"
-            if [ ! -f "$part_img" ]; then
+            [ ! -f "$part_img" ] && { 
                 echo -e "${RED}Error: Repacked image '${part_img}' not found!${RESET}"
+                echo -e "${RED}Expected partition image for: ${BOLD}${part}${RESET}"
                 exit 1
-            fi
-            local size
-            size=$(stat -c%s "$part_img")
-            # If partition is empty (0 bytes), allocate at least 4096 bytes (one block) for lpmake
-            # The file itself remains 0 bytes, but lpmake needs at least one block
-            if [ "$size" -eq 0 ]; then
-                size=4096
-            fi
-            current_partition_sizes[$part]=$size
-            total_group_size=$((total_group_size + size))
+            }
+
+            local size=$(stat -c%s "$part_img" 2>/dev/null)
+            [ -z "$size" ] && { echo -e "${RED}Error: Could not determine size of '${part_img}'${RESET}"; exit 1; }
+
+            # Handle empty partitions: 0 bytes for virtual-ab, 4096 for non-virtual-ab
+            [ "$size" -eq 0 ] && size=$([ "$VIRTUAL_AB" = "true" ] && echo 0 || echo 4096)
+
+            partition_sizes[$part]=$size
+            # Only count non-zero partitions for virtual-ab (empty partitions don't consume space)
+            [ "$VIRTUAL_AB" != "true" ] || [ "$size" -gt 0 ] && total_group_size=$((total_group_size + size))
         done
         
-        total_partitions_size=$((total_partitions_size + total_group_size))
+        # Use saved group size for virtual-ab (preserves original layout), calculated size otherwise
+        if [ "$VIRTUAL_AB" = "true" ] && [ -n "$saved_group_size" ] && [ "$saved_group_size" -gt 0 ]; then
+            total_group_size=$saved_group_size
+        fi
+        group_sizes[$group]=$total_group_size
+    done
+
+    # For virtual-ab, all groups share the same maximum size (they share physical space)
+    if [ "$VIRTUAL_AB" = "true" ]; then
+        local max_group_size=0
+        for group in $LP_GROUPS; do
+            [ "${group_sizes[$group]}" -gt "$max_group_size" ] && max_group_size=${group_sizes[$group]}
+        done
+        if [ "$max_group_size" -gt 0 ]; then
+            for group in $LP_GROUPS; do
+                group_sizes[$group]=$max_group_size
+            done
+            local max_group_size_hr
+            max_group_size_hr=$(numfmt --to=iec-i --suffix=B "$max_group_size" 2>/dev/null || echo "${max_group_size} bytes")
+            echo -e "${BLUE}Virtual-AB: All groups share maximum size of ${max_group_size_hr}${RESET}"
+        fi
+    fi
+
+    # Build lpmake command with groups and partitions
+    local total_partitions_size=0
+    for group in $LP_GROUPS; do
+        local group_partitions_var="LP_GROUP_${group}_PARTITIONS"
+        local partitions="${!group_partitions_var}"
+        [ -z "$partitions" ] && continue
         
-        cmd+=" --group ${group}:${total_group_size}"
+        cmd+=" --group ${group}:${group_sizes[$group]}"
+        [ "${group_sizes[$group]}" -gt "$total_partitions_size" ] && total_partitions_size=${group_sizes[$group]}
         
         for part in $partitions; do
-            cmd+=" --partition ${part}:none:${current_partition_sizes[$part]}:${group}"
-            cmd+=" --image ${part}=${session_dir}/${part}.img"
+            cmd+=" --partition ${part}:none:${partition_sizes[$part]}:${group}"
+            # Empty partitions (0 bytes) don't need --image flag for virtual-ab
+            # For non-virtual-ab or non-empty partitions, always include --image
+            if [ "$VIRTUAL_AB" != "true" ] || [ "${partition_sizes[$part]}" -gt 0 ]; then
+                cmd+=" --image ${part}=${session_dir}/${part}.img"
+            fi
         done
     done
     
@@ -276,7 +359,7 @@ run_repack() {
         echo -e "\n${RED}To fix this, you need to either modify your project to remove the bloat or use the 'EROFS' filesystem with lz4/lz4hc compression for the logical partitions.${RESET}"
         exit 1
     fi
-    
+
     if [ "$create_sparse" = true ]; then
         cmd+=" --sparse"
     fi

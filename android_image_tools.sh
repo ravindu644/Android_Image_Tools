@@ -633,6 +633,13 @@ run_super_unpack_interactive() {
     local empty_partitions_file="${metadata_dir}/empty_partitions.txt"
     touch "$partition_list_file" "$empty_partitions_file"
 
+    # Check if this is a virtual-AB image
+    local is_virtual_ab=false
+    if [ -f "${metadata_dir}/super_repack_info.txt" ]; then
+        load_metadata "${metadata_dir}/super_repack_info.txt"
+        [ "${VIRTUAL_AB:-false}" = "true" ] && is_virtual_ab=true
+    fi
+
     # Detect empty partitions and separate them from partitions to unpack
     local all_partitions=()
     local partitions_to_unpack=()
@@ -644,7 +651,7 @@ run_super_unpack_interactive() {
         if is_empty_partition "$part_img"; then
             empty_partitions+=("$item")
             echo "$item" >> "$empty_partitions_file"
-            echo -e "${YELLOW}Detected empty partition: ${BOLD}${item}${RESET}"
+            # Don't spam individual messages - will show summary below
         else
             partitions_to_unpack+=("$item")
         fi
@@ -661,9 +668,13 @@ run_super_unpack_interactive() {
     local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
     local all_successful=true
 
+    # Show concise message about empty partitions
     if [ "$empty_count" -gt 0 ]; then
-        echo -e "\n${BLUE}Found ${BOLD}${empty_count}${RESET} empty partition(s): ${YELLOW}${empty_partitions[*]}${RESET}"
-        echo -e "${BLUE}Empty partitions will be skipped during unpack and recreated during repack.${RESET}\n"
+        if [ "$is_virtual_ab" = true ]; then
+            echo -e "\n${BLUE}Detected virtual A/B layout with ${BOLD}${empty_count}${RESET} empty slot partitions (normal for virtual-AB).${RESET}\n"
+        else
+            echo -e "\n${BLUE}Found ${BOLD}${empty_count}${RESET} empty partition(s). They will be skipped during unpack and recreated during repack.${RESET}\n"
+        fi
     fi
 
     if [ "$total" -eq 0 ]; then
@@ -1073,11 +1084,13 @@ run_super_repack_interactive() {
     fi
     
     # Create empty partition files before final assembly
-    # Create 0-byte files, but super-tools.sh will allocate at least 4096 bytes for them in lpmake
+    # Create 0-byte files - super-tools.sh will handle them correctly:
+    # - For virtual-ab images: kept as 0 bytes
+    # - For non-virtual-ab images: allocated at least 4096 bytes in lpmake
     if [ "$empty_count" -gt 0 ]; then
         echo -e "\n${BLUE}--- Creating empty partition files ---${RESET}"
         for empty_part in "${empty_partitions[@]}"; do
-            # Create 0-byte file (will be allocated 4096 bytes in lpmake command)
+            # Create 0-byte file (handled appropriately by super-tools.sh based on virtual-ab flag)
             touch "${logical_dir}/${empty_part}.img"
             echo -e "${GREEN}[✓] Created empty file: ${BOLD}${empty_part}.img${RESET}"
         done
@@ -1243,7 +1256,15 @@ run_non_interactive() {
             all_partition_images+=("$logical_img")
         done < <(find "$project_dir/logical_partitions" -maxdepth 1 -type f -name '*.img' ! -name 'super.raw.img')
         
+        # Check if this is a virtual-AB image
+        local is_virtual_ab=false
+        if [ -f "${metadata_dir}/super_repack_info.txt" ]; then
+            load_metadata "${metadata_dir}/super_repack_info.txt"
+            [ "${VIRTUAL_AB:-false}" = "true" ] && is_virtual_ab=true
+        fi
+        
         # Detect empty partitions and separate them
+        local empty_count=0
         for logical_img in "${all_partition_images[@]}"; do
             local part_name
             part_name=$(basename "$logical_img" .img)
@@ -1251,7 +1272,7 @@ run_non_interactive() {
             
             if is_empty_partition "$logical_img"; then
                 echo "$part_name" >> "$empty_partitions_file"
-                echo -e "${YELLOW}Detected empty partition: ${BOLD}${part_name}${RESET}"
+                empty_count=$((empty_count + 1))
             else
                 echo -e "--- Unpacking logical partition: ${part_name} ---"
                 local quiet_flag=""
@@ -1264,6 +1285,15 @@ run_non_interactive() {
                 fi
             fi
         done
+        
+        # Show concise message about empty partitions
+        if [ "$empty_count" -gt 0 ]; then
+            if [ "$is_virtual_ab" = true ]; then
+                echo -e "\n${BLUE}Detected virtual A/B layout with ${BOLD}${empty_count}${RESET} empty slot partitions (normal for virtual-AB).${RESET}"
+            else
+                echo -e "\n${BLUE}Found ${BOLD}${empty_count}${RESET} empty partition(s). They will be skipped during unpack and recreated during repack.${RESET}"
+            fi
+        fi
         rm -rf "$project_dir/logical_partitions"
         echo -e "\n${GREEN}${BOLD}Success: Super image unpacked to $project_dir${RESET}"
 
@@ -1365,11 +1395,13 @@ run_non_interactive() {
         fi
 
         # Create empty partition files before final assembly
-        # Create 0-byte files, but super-tools.sh will allocate at least 4096 bytes for them in lpmake
+        # Create 0-byte files - super-tools.sh will handle them correctly:
+        # - For virtual-ab images: kept as 0 bytes
+        # - For non-virtual-ab images: allocated at least 4096 bytes in lpmake
         if [ ${#empty_partitions[@]} -gt 0 ]; then
             echo "--- Creating empty partition files ---"
             for empty_part in "${empty_partitions[@]}"; do
-                # Create 0-byte file (will be allocated 4096 bytes in lpmake command)
+                # Create 0-byte file (handled appropriately by super-tools.sh based on virtual-ab flag)
                 touch "${logical_dir}/${empty_part}.img"
             done
         fi
