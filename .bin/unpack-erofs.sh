@@ -266,6 +266,13 @@ handle_shared_blocks "$IMAGE_FILE"
 
 # Function to detect if an image is sparse
 is_sparse_image() {
+    # Primary method: Use 'file' command for reliable detection (works with all sparse image versions)
+    if file "$1" 2>/dev/null | grep -qi "Android sparse image"; then
+        return 0
+    fi
+
+    # Fallback method: Check magic header bytes (3aff26ed)
+    # Read first 4 bytes and check for sparse image magic header
     local header
     header=$(hexdump -n 4 -e '4/1 "%02x"' "$1" 2>/dev/null)
     [ "$header" == "3aff26ed" ]
@@ -276,15 +283,18 @@ prepare_image_for_mount() {
     local input="$1"
     
     if is_sparse_image "$input"; then
-        echo -e "${YELLOW}Detected sparse image format${RESET}"
-        RAW_IMAGE="$TMP_DIR/${input%.img}_raw.img"
-        echo -e "${BLUE}Converting to raw image as ${BOLD}$RAW_IMAGE${RESET}"
-        if simg2img "$input" "$RAW_IMAGE" 2>/dev/null; then
-            echo -e "${GREEN}Successfully converted sparse image${RESET}"
+        echo -e "${YELLOW}Detected sparse image format${RESET}" >&2
+        # Ensure TMP_DIR exists
+        mkdir -p "$TMP_DIR"
+        RAW_IMAGE="$TMP_DIR/$(basename "$input" .img)_raw.img"
+        echo -e "${BLUE}Converting to raw image as ${BOLD}$RAW_IMAGE${RESET}" >&2
+        if simg2img "$input" "$RAW_IMAGE"; then
+            echo -e "${GREEN}Successfully converted sparse image${RESET}" >&2
             echo "$RAW_IMAGE"
             return 0
         else
-            echo -e "${RED}Failed to convert sparse image${RESET}"
+            local exit_code=$?
+            echo -e "${RED}Failed to convert sparse image (exit code: $exit_code). Check if simg2img is installed.${RESET}" >&2
             return 1
         fi
     fi
