@@ -423,26 +423,110 @@ create_ext4_image_quiet() {
     mount -o loop,rw,seclabel "$output" "$mount_point" 2>/dev/null
 }
 
-# Prepare EXT4 features string for mkfs (disables default features not in original)
+# Prepare EXT4 features string for mkfs by comparing with default mkfs.ext4 features
 prepare_ext4_features() {
     local original_features="$1"
-    local features_for_mkfs
+    local tmp_dummy_img
+    tmp_dummy_img=$(mktemp "${TMP_DIR:-/tmp}/dummy_ext4_features_XXXXXX.img" 2>/dev/null || echo "/tmp/dummy_ext4_features_$$.img")
     
-    # Clean up feature string and disable journal if not present
-    features_for_mkfs=$(echo "$original_features" | sed 's/,,/,/g')
-    if [[ "$features_for_mkfs" != *has_journal* ]]; then
-        features_for_mkfs+=",^has_journal"
-    fi
-    
-    # Disable default features that mkfs.ext4 might add automatically
-    local DEFAULT_FEATURES_TO_CHECK=("resize_inode" "64bit" "flex_bg" "metadata_csum")
-    for feature in "${DEFAULT_FEATURES_TO_CHECK[@]}"; do
-        if [[ "$original_features" != *"$feature"* ]]; then
-            features_for_mkfs+=",^$feature"
-        fi
+    # Create a dummy ext4 image to get default features (silently, no logging)
+    dd if=/dev/zero of="$tmp_dummy_img" bs=4096 count=100 2>/dev/null
+    mkfs.ext4 -q -F "$tmp_dummy_img" 2>/dev/null
+
+    # Extract default features from dummy image
+    local default_features
+    default_features=$(tune2fs -l "$tmp_dummy_img" 2>/dev/null | grep "Filesystem features:" | awk -F':' '{print $2}' | xargs | sed 's/ /,/g')
+
+    # Clean up dummy image
+    rm -f "$tmp_dummy_img"
+
+    # Filter out runtime-only flags that can't be set with mkfs.ext4
+    # These appear in tune2fs -l output but are not valid mkfs.ext4 options
+    local RUNTIME_FLAGS=("orphan_file" "needs_recovery" "orphan_present" "uninit_bg")
+    local filtered_original="$original_features"
+    local filtered_default="$default_features"
+
+    for flag in "${RUNTIME_FLAGS[@]}"; do
+        filtered_original=$(echo "$filtered_original" | sed "s/,$flag//g; s/^$flag,//g; s/,$flag$//g; s/^$flag$//g")
+        filtered_default=$(echo "$filtered_default" | sed "s/,$flag//g; s/^$flag,//g; s/,$flag$//g; s/^$flag$//g")
     done
+
+    # Special handling for has_journal: it's enabled by default in ext4, so we never enable it explicitly
+    # If original doesn't have it, we disable it with ^has_journal
+    local has_journal_in_original=false
+    if echo "$filtered_original" | grep -q "has_journal"; then
+        has_journal_in_original=true
+        # Remove has_journal from original features (we'll handle it separately)
+        filtered_original=$(echo "$filtered_original" | sed "s/,has_journal//g; s/^has_journal,//g; s/,has_journal$//g; s/^has_journal$//g")
+    fi
+
+    # Clean up any double commas
+    filtered_original=$(echo "$filtered_original" | sed 's/,,/,/g; s/^,//; s/,$//')
+    filtered_default=$(echo "$filtered_default" | sed 's/,,/,/g; s/^,//; s/,$//')
+
+    # Convert comma-separated strings to arrays for comparison
+    IFS=',' read -ra original_array <<< "$filtered_original"
+    IFS=',' read -ra default_array <<< "$filtered_default"
+
+    # Find features to enable (in original but not in default)
+    local features_to_enable=()
+    for feature in "${original_array[@]}"; do
+        feature=$(echo "$feature" | xargs) # trim whitespace
+        [[ -z "$feature" ]] && continue
+        local found=false
+        for def_feature in "${default_array[@]}"; do
+            def_feature=$(echo "$def_feature" | xargs)
+            if [[ "$feature" == "$def_feature" ]]; then
+                found=true
+                break
+            fi
+        done
+        [[ "$found" == false ]] && features_to_enable+=("$feature")
+    done
+
+    # Find features to disable (in default but not in original)
+    local features_to_disable=()
+    for def_feature in "${default_array[@]}"; do
+        def_feature=$(echo "$def_feature" | xargs)
+        [[ -z "$def_feature" ]] && continue
+        local found=false
+        for feature in "${original_array[@]}"; do
+            feature=$(echo "$feature" | xargs)
+            if [[ "$def_feature" == "$feature" ]]; then
+                found=true
+                break
+            fi
+        done
+        [[ "$found" == false ]] && features_to_disable+=("^$def_feature")
+    done
+
+    # Handle has_journal: if original doesn't have it, disable it (it's enabled by default)
+    if [ "$has_journal_in_original" = false ]; then
+        features_to_disable+=("^has_journal")
+    fi
+
+    # Build mkfs.ext4 -O options string
+    local enable_str=""
+    local disable_str=""
     
-    echo "$features_for_mkfs"
+    if [ ${#features_to_enable[@]} -gt 0 ]; then
+        enable_str=$(IFS=','; echo "${features_to_enable[*]}")
+    fi
+
+    if [ ${#features_to_disable[@]} -gt 0 ]; then
+        disable_str=$(IFS=','; echo "${features_to_disable[*]}")
+    fi
+
+    # Return format: "enable_features|disable_features" (pipe separator for parsing)
+    if [ -n "$enable_str" ] && [ -n "$disable_str" ]; then
+        echo "$enable_str|$disable_str"
+    elif [ -n "$enable_str" ]; then
+        echo "$enable_str|"
+    elif [ -n "$disable_str" ]; then
+        echo "|$disable_str"
+    else
+        echo "|"
+    fi
 }
 
 # Create EXT4 image with original parameters
@@ -450,30 +534,59 @@ create_ext4_image_strict() {
     local output_img="$1"
     local block_size="$2"
     local block_count="$3"
-    local features="$4"
-    
+    local features_string="$4"
+
     dd if=/dev/zero of="$output_img" bs="$block_size" count="$block_count" status=none
-    local mkfs_cmd="mkfs.ext4 -q -b $block_size -m $ORIGINAL_RESERVED_BLOCKS_PERCENTAGE -I $ORIGINAL_INODE_SIZE -N $ORIGINAL_INODE_COUNT -U $ORIGINAL_UUID -O $features"
+
+    # Parse features string (format: "enable_features|disable_features")
+    local enable_features=""
+    local disable_features=""
+    if [[ "$features_string" == *"|"* ]]; then
+        enable_features="${features_string%%|*}"
+        disable_features="${features_string#*|}"
+    else
+        # Fallback: treat as enable features only
+        enable_features="$features_string"
+    fi
+
+    # Build mkfs.ext4 command with proper -O options
+    local mkfs_cmd="mkfs.ext4 -q -b $block_size -m $ORIGINAL_RESERVED_BLOCKS_PERCENTAGE -I $ORIGINAL_INODE_SIZE -N $ORIGINAL_INODE_COUNT -U $ORIGINAL_UUID"
+
+    # Add enable features if any
+    if [ -n "$enable_features" ]; then
+        mkfs_cmd+=" -O $enable_features"
+    fi
+
+    # Add disable features if any (separate -O option)
+    if [ -n "$disable_features" ]; then
+        mkfs_cmd+=" -O $disable_features"
+    fi
+
+    # Add volume label if present
     [ -n "$ORIGINAL_VOLUME_NAME" ] && mkfs_cmd+=" -L $ORIGINAL_VOLUME_NAME"
-    eval "$mkfs_cmd $output_img"
+
+    # Add output file
+    mkfs_cmd+=" $output_img"
+
+    eval "$mkfs_cmd"
 }
 
 # Check if tar pipe failed due to space issues
 check_tar_space_error() {
     local exit_code="$1"
     local log_file="$2"
-    
+
     if [ "$exit_code" -eq 0 ]; then
         return 1  # No error
     fi
-    
+
     # Check log file for space-related errors
     if [ -n "$log_file" ] && [ -f "$log_file" ]; then
         if grep -qi "No space left on device\|write failed\|failed to set\|error.*space\|ENOSPC\|tar:.*: No space left\|tar:.*: Cannot write" "$log_file" 2>/dev/null; then
             return 0  # Space error detected
         fi
     fi
-    
+
     # If exit code is 1 and we have a log file, check for common space-related patterns
     if [ "$exit_code" -eq 1 ]; then
         # Check if destination is full
@@ -483,82 +596,82 @@ check_tar_space_error() {
             fi
         fi
     fi
-    
+
     return 1  # Not a space error
 }
 
 calculate_optimal_ext4_size() {
     local content_dir="$1"
     local overhead_percent="${2:-15}"
-    
+
     # Send debug output to stderr so it doesn't interfere with return value
     echo -e "${BLUE}Calculating optimal image size...${RESET}" >&2
-    
+
     # Step 1: Get actual content size (excluding .repack_info)
     local content_bytes=$(du -sb --exclude=.repack_info "$content_dir" | awk '{print $1}')
     echo -e "${BLUE}├─ Content size: $(numfmt --to=iec-i --suffix=B $content_bytes)${RESET}" >&2
-    
+
     # Step 2: Calculate block allocation overhead (files take whole blocks)
     local block_size=4096
     local file_count=$(find "$content_dir" -not -path "*/.repack_info/*" -type f | wc -l)
     local dir_count=$(find "$content_dir" -type d -not -path "*/.repack_info/*" | wc -l)
-    
+
     # Estimate block allocation overhead more conservatively
     # Each file/directory takes at least 1 block, and files may have partial blocks
     # Use a conservative estimate: assume 2-3% overhead for block allocation
     # This accounts for small files, partial blocks, and directory blocks
     local block_allocation_overhead=$((content_bytes * 3 / 100))
-    
+
     # Step 3: Calculate ext4 metadata overhead
     # Count files and directories for inode calculation
     local required_inodes=$((file_count + dir_count + 100))
-    
+
     # Ext4 uses 1 inode per 16KB by default, but we'll be more precise
     local inode_size=256  # Default inode size
-    
+
     # Calculate minimum blocks needed for inodes
     local inode_table_blocks=$(( (required_inodes * inode_size + block_size - 1) / block_size ))
-    
+
     # Base metadata overhead: superblock, group descriptors, bitmaps, etc.
     # Estimate ~300KB base (more conservative)
     local base_metadata_overhead=$((300 * 1024))
-    
+
     # Directory entries overhead: each directory needs space for entries and directory blocks
     # Estimate ~2-4KB per directory (more conservative for directory blocks)
     local dir_entry_overhead=$((dir_count * 3072))  # ~3KB per directory
-    
+
     # Content-based metadata overhead (more accurate than percentage)
     # Account for extent trees, directory blocks, etc.
     # Increase to 10% to be more conservative
     local content_metadata_overhead=$((content_bytes * 10 / 100))  # 10% for content metadata
-    
+
     # Safety margin for block allocation differences and mkfs.ext4 overhead
     # Increase significantly - mkfs.ext4 can allocate more than expected
     local safety_margin=$((800 * 1024))  # 800KB safety margin
-    
+
     # Total metadata overhead
     local total_metadata_overhead=$((base_metadata_overhead + dir_entry_overhead + content_metadata_overhead + safety_margin + inode_table_blocks * block_size))
-    
+
     echo -e "${BLUE}├─ Base metadata overhead: $(numfmt --to=iec-i --suffix=B $base_metadata_overhead)${RESET}" >&2
     echo -e "${BLUE}├─ Content overhead (8%): $(numfmt --to=iec-i --suffix=B $content_metadata_overhead)${RESET}" >&2
     echo -e "${BLUE}├─ Safety margin: $(numfmt --to=iec-i --suffix=B $safety_margin)${RESET}" >&2
     echo -e "${BLUE}├─ Total metadata overhead: $(numfmt --to=iec-i --suffix=B $total_metadata_overhead)${RESET}" >&2
     echo -e "${BLUE}├─ Required inodes: $required_inodes${RESET}" >&2
-    
+
     # Step 4: Calculate base filesystem size (content + block overhead + metadata)
     local base_fs_size=$((content_bytes + block_allocation_overhead + total_metadata_overhead))
-    
+
     # Step 5: Add user-specified overhead (using integer arithmetic)
     local user_overhead=$((base_fs_size * overhead_percent / 100))
     local final_size=$((base_fs_size + user_overhead))
-    
+
     # Step 6: Round up to nearest block boundary
     local final_blocks=$(( (final_size + block_size - 1) / block_size ))
     local final_size_rounded=$((final_blocks * block_size))
-    
+
     echo -e "${BLUE}├─ User overhead (${overhead_percent}%): $(numfmt --to=iec-i --suffix=B $user_overhead)${RESET}" >&2
     echo -e "${BLUE}└─ Final size: $(numfmt --to=iec-i --suffix=B $final_size_rounded) (${final_blocks} blocks)${RESET}" >&2
-    
+
     # Only return the number
     echo "$final_blocks"
 }
@@ -568,14 +681,14 @@ create_ext4_flexible() {
     local output_img="$2"
     local mount_point="$3"
     local overhead_percent="$4"
-    
+
     echo -e "\n${YELLOW}${BOLD}Flexible mode: Calculating optimal image size...${RESET}\n"
-    
+
     local content_size=$(du -sb --exclude=.repack_info "$extract_dir" | awk '{print $1}')
     local max_attempts=5
     local attempt=1
     local optimal_blocks
-    
+
     while [ $attempt -le $max_attempts ]; do
         if [ $attempt -eq 1 ]; then
             # First attempt: use calculated size + 10% overhead for mkfs.ext4 metadata
@@ -586,45 +699,53 @@ create_ext4_flexible() {
             echo -e "${YELLOW}Attempt $attempt: Increasing image size by 10%...${RESET}"
             optimal_blocks=$((optimal_blocks + (optimal_blocks * 10 / 100)))
         fi
-        
+
         echo -e "\n${BLUE}Creating ext4 image (${optimal_blocks} blocks)...${RESET}"
-        
+
         # Create the image with calculated size
         dd if=/dev/zero of="$output_img" bs=4096 count="$optimal_blocks" status=none
-        
+
         # Format with optimal settings
         if [ "$FILESYSTEM_TYPE" == "ext4" ] && [ -n "$ORIGINAL_UUID" ]; then
             # Preserve original filesystem characteristics when available
-            if [ -n "$ORIGINAL_VOLUME_NAME" ]; then
-                mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -m "$ORIGINAL_RESERVED_BLOCKS_PERCENTAGE" -U "$ORIGINAL_UUID" -L "$ORIGINAL_VOLUME_NAME" -O "$ORIGINAL_FEATURES" "$output_img"
-            else
-                mkfs.ext4 -q -b 4096 -I "$ORIGINAL_INODE_SIZE" -m "$ORIGINAL_RESERVED_BLOCKS_PERCENTAGE" -U "$ORIGINAL_UUID" -O "$ORIGINAL_FEATURES" "$output_img"
-            fi
+            local features_for_mkfs
+            features_for_mkfs=$(prepare_ext4_features "$ORIGINAL_FEATURES")
+
+            # Parse features string
+            local enable_features="${features_for_mkfs%%|*}"
+            local disable_features="${features_for_mkfs#*|}"
+
+            local mkfs_cmd="mkfs.ext4 -q -b 4096 -I $ORIGINAL_INODE_SIZE -m $ORIGINAL_RESERVED_BLOCKS_PERCENTAGE -U $ORIGINAL_UUID"
+            [ -n "$enable_features" ] && mkfs_cmd+=" -O $enable_features"
+            [ -n "$disable_features" ] && mkfs_cmd+=" -O $disable_features"
+            [ -n "$ORIGINAL_VOLUME_NAME" ] && mkfs_cmd+=" -L $ORIGINAL_VOLUME_NAME"
+            mkfs_cmd+=" $output_img"
+            eval "$mkfs_cmd"
         else
             # Use optimized defaults for new filesystem
             mkfs.ext4 -q -b 4096 -i 16384 -m 1 -O ^has_journal,^resize_inode,dir_index,extent,sparse_super "$output_img"
         fi
-        
+
         # Mount the new filesystem
         mkdir -p "$mount_point"
         mount -o loop,rw "$output_img" "$mount_point" 2>/dev/null
-        
+
         if [ $? -ne 0 ]; then
             echo -e "${RED}Error: Failed to mount created image${RESET}"
             rm -f "$output_img"
             attempt=$((attempt + 1))
             continue
         fi
-        
+
         echo -e "${GREEN}✓ Image created and mounted successfully${RESET}"
-        
+
         # Verify we have enough space
         local available_space=$(df --output=avail -B1 "$mount_point" | tail -n1)
         local total_space=$(df --output=size -B1 "$mount_point" | tail -n1)
-        
+
         # Add 5% buffer for safety (ext4 can have allocation differences)
         local required_space=$((content_size + (content_size * 5 / 100)))
-        
+
         if [ "$available_space" -ge "$required_space" ]; then
             # Success! We have enough space
             local free_after_copy=$((available_space - content_size))
@@ -642,7 +763,7 @@ create_ext4_flexible() {
             attempt=$((attempt + 1))
         fi
     done
-    
+
     # All attempts failed
     echo -e "${RED}Error: Failed to create image with sufficient space after $max_attempts attempts${RESET}"
     return 1
