@@ -136,29 +136,6 @@ parse_lpdump_and_save_config() {
             }
         }
     ' "$lpdump_file" >> "$config_file"
-
-    # Parse group sizes from Group table
-    awk '
-        /Group table:/ { in_group_table=1; next }
-        /^$/ && in_group_table && group_found { in_group_table=0 }
-        /Block device table:/ { in_group_table=0 }
-
-        in_group_table {
-            if ($1 == "Name:") { 
-                current_group = $2
-                group_found = 1
-            }
-            if ($1 == "Maximum" && $2 == "size:") {
-                # Extract size (remove "bytes" suffix if present)
-                size = $3
-                gsub(/bytes/, "", size)
-                gsub(/,/, "", size)  # Remove commas if present
-                if (current_group != "" && size != "" && size != "0") {
-                    printf "LP_GROUP_%s_SIZE=%s\n", current_group, size
-                }
-            }
-        }
-    ' "$lpdump_file" >> "$config_file"
     
     # Strip <none> values from config file (replace =<none> with =)
     sed -i 's/=<none>$/=/' "$config_file"
@@ -176,14 +153,14 @@ run_unpack() {
     if [ ! -f "$super_image" ]; then
         echo -e "${RED}Error: Input file not found: '$super_image'${RESET}"; exit 1
     fi
-    
+
     TMP_DIR=$(mktemp -d -p "$TMP_DIR" super_unpack_XXXXXX)
-    
+
     local raw_super_image="${TMP_DIR}/super.raw.img"
     local config_file="${TMP_DIR}/repack_info.txt"
 
     echo -e "\n${BLUE}${BOLD}Starting unpack process for${RESET} ${BOLD}${super_image}...${RESET}"
-    
+
     if file "$super_image" | grep -q "sparse"; then
         echo -e "\n${YELLOW}${BOLD}Sparse image detected. Converting to raw image...${RESET}"
         simg2img "$super_image" "$raw_super_image"
@@ -198,11 +175,11 @@ run_unpack() {
     parse_lpdump_and_save_config "${TMP_DIR}/lpdump.txt" "$config_file"
 
     echo -e "\n${BLUE}Unpacking logical partitions...${RESET}"
-    
+
     # Run lpunpack in the background and capture its output to prevent screen clutter.
     lpunpack --slot=0 "$raw_super_image" "$output_dir" >/dev/null 2>&1 &
     local pid=$!
-    
+
     local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
     local spin=0
 
@@ -271,7 +248,19 @@ run_repack() {
         exit 1
     fi
 
-    # Collect partition sizes and calculate group sizes
+    # Calculate maximum possible group size based on super device size minus metadata overhead
+    # Formula: Max Group Size = Super Device Size - Reserved Space - Metadata Size
+    # LP_PARTITION_RESERVED_BYTES = 4096 bytes (reserved at start to avoid boot sector)
+    # LP_METADATA_SIZE = 65536 bytes per slot
+    # For virtual-AB: All groups share physical space, so they can all use the full max size
+    # For non-virtual-AB: Groups may need to share space, but typically one group uses full max size
+    local LP_PARTITION_RESERVED_BYTES=4096
+    local LP_METADATA_SIZE=65536
+    local metadata_slots="${METADATA_SLOTS:-2}"
+    local total_metadata_size=$((LP_METADATA_SIZE * metadata_slots))
+    local max_group_size=$((SUPER_DEVICE_SIZE - LP_PARTITION_RESERVED_BYTES - total_metadata_size))
+
+    # Collect partition sizes
     declare -A partition_sizes
     declare -A group_sizes
 
@@ -280,11 +269,7 @@ run_repack() {
         local partitions="${!group_partitions_var}"
         [ -z "$partitions" ] && continue
 
-        local total_group_size=0
-        local saved_group_size_var="LP_GROUP_${group}_SIZE"
-        local saved_group_size="${!saved_group_size_var}"
-
-        # Calculate partition sizes and group size
+        # Calculate partition sizes
         for part in $partitions; do
             local part_img="${session_dir}/${part}.img"
             [ ! -f "$part_img" ] && { 
@@ -300,32 +285,11 @@ run_repack() {
             [ "$size" -eq 0 ] && size=$([ "$VIRTUAL_AB" = "true" ] && echo 0 || echo 4096)
 
             partition_sizes[$part]=$size
-            # Only count non-zero partitions for virtual-ab (empty partitions don't consume space)
-            [ "$VIRTUAL_AB" != "true" ] || [ "$size" -gt 0 ] && total_group_size=$((total_group_size + size))
         done
         
-        # Use saved group size for virtual-ab (preserves original layout), calculated size otherwise
-        if [ "$VIRTUAL_AB" = "true" ] && [ -n "$saved_group_size" ] && [ "$saved_group_size" -gt 0 ]; then
-            total_group_size=$saved_group_size
-        fi
-        group_sizes[$group]=$total_group_size
+        # All groups use the maximum possible size (not sum of partitions)
+        group_sizes[$group]=$max_group_size
     done
-
-    # For virtual-ab, all groups share the same maximum size (they share physical space)
-    if [ "$VIRTUAL_AB" = "true" ]; then
-        local max_group_size=0
-        for group in $LP_GROUPS; do
-            [ "${group_sizes[$group]}" -gt "$max_group_size" ] && max_group_size=${group_sizes[$group]}
-        done
-        if [ "$max_group_size" -gt 0 ]; then
-            for group in $LP_GROUPS; do
-                group_sizes[$group]=$max_group_size
-            done
-            local max_group_size_hr
-            max_group_size_hr=$(numfmt --to=iec-i --suffix=B "$max_group_size" 2>/dev/null || echo "${max_group_size} bytes")
-            echo -e "${BLUE}Virtual-AB: All groups share maximum size of ${max_group_size_hr}${RESET}"
-        fi
-    fi
 
     # Build lpmake command with groups and partitions
     local total_partitions_size=0
