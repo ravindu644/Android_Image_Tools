@@ -305,7 +305,7 @@ run_repack() {
         done
         
         # Use saved group size for virtual-ab (preserves original layout), calculated size otherwise
-        if [ "$VIRTUAL_AB" = "true" ] && [ -n "$saved_group_size" ] && [ "$saved_group_size" -gt 0 ]; then
+        if [ "$VIRTUAL_AB" = "true" ] && [ -n "$saved_group_size" ] && [ "$saved_group_size" -gt "$total_group_size" ]; then
             total_group_size=$saved_group_size
         fi
         group_sizes[$group]=$total_group_size
