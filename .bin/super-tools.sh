@@ -293,6 +293,8 @@ run_repack() {
 
     # Build lpmake command with groups and partitions
     local total_partitions_size=0
+    # Calculate total size of ALL partition images (including 0-byte partitions)
+    local total_all_partitions_size=0
     for group in $LP_GROUPS; do
         local group_partitions_var="LP_GROUP_${group}_PARTITIONS"
         local partitions="${!group_partitions_var}"
@@ -303,6 +305,8 @@ run_repack() {
         
         for part in $partitions; do
             cmd+=" --partition ${part}:none:${partition_sizes[$part]}:${group}"
+            # Sum up all partition sizes (including 0-byte partitions) for validation
+            total_all_partitions_size=$((total_all_partitions_size + partition_sizes[$part]))
             # Empty partitions (0 bytes) don't need --image flag for virtual-ab
             # For non-virtual-ab or non-empty partitions, always include --image
             if [ "$VIRTUAL_AB" != "true" ] || [ "${partition_sizes[$part]}" -gt 0 ]; then
@@ -311,15 +315,16 @@ run_repack() {
         done
     done
     
-    if [ "$total_partitions_size" -gt "$SUPER_DEVICE_SIZE" ]; then
+    # Validate that sum of all partition sizes doesn't exceed max group size
+    if [ "$total_all_partitions_size" -gt "$max_group_size" ]; then
         local total_hr
-        total_hr=$(numfmt --to=iec-i --suffix=B "$total_partitions_size")
-        local device_hr
-        device_hr=$(numfmt --to=iec-i --suffix=B "$SUPER_DEVICE_SIZE")
+        total_hr=$(numfmt --to=iec-i --suffix=B "$total_all_partitions_size")
+        local max_group_hr
+        max_group_hr=$(numfmt --to=iec-i --suffix=B "$max_group_size")
         
-        echo -e "\n${RED}${BOLD}FATAL ERROR: The combined size of your repacked partitions is larger than the super device can hold.${RESET}"
+        echo -e "\n${RED}${BOLD}FATAL ERROR: The combined size of your repacked partitions is larger than the maximum group size can hold.${RESET}"
         echo -e "  - Total Partition Size: ${YELLOW}${total_hr}${RESET}"
-        echo -e "  - Super Device Capacity:  ${YELLOW}${device_hr}${RESET}"
+        echo -e "  - Maximum Group Size:  ${YELLOW}${max_group_hr}${RESET}"
         echo -e "\n${RED}To fix this, you need to either modify your project to remove the bloat or use the 'EROFS' filesystem with lz4/lz4hc compression for the logical partitions.${RESET}"
         exit 1
     fi
