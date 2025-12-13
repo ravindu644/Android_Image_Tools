@@ -37,7 +37,7 @@ cleanup() {
             rm -rf "$TMP_DIR"
         fi
     fi
-    
+
     # Restore original SELinux status
     if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
         setenforce 1 2>/dev/null || true
@@ -136,10 +136,10 @@ parse_lpdump_and_save_config() {
             }
         }
     ' "$lpdump_file" >> "$config_file"
-    
+
     # Strip <none> values from config file (replace =<none> with =)
     sed -i 's/=<none>$/=/' "$config_file"
-    
+
     echo -e "${GREEN}[✓] Repack configuration saved.${RESET}"
 }
 
@@ -147,7 +147,7 @@ parse_lpdump_and_save_config() {
 run_unpack() {
     local super_image="$1"
     local output_dir="$2"
-    
+
     output_dir=${output_dir%/}
 
     if [ ! -f "$super_image" ]; then
@@ -222,7 +222,7 @@ run_repack() {
     if [ ! -d "$session_dir" ] || [ ! -f "$config_file" ]; then
         echo -e "${RED}Error: Invalid session directory or missing metadata.${RESET}"; exit 1
     fi
-    
+
     echo -e "\n${BLUE}Starting repack process using partitions from: ${BOLD}${session_dir}${RESET}"
     source "$config_file"
 
@@ -234,13 +234,13 @@ run_repack() {
     cmd+=" --super-name super"
     cmd+=" --metadata-slots ${METADATA_SLOTS}"
     cmd+=" --device super:${SUPER_DEVICE_SIZE}"
-    
+
     # Add virtual-ab flag if detected
     if [ "$VIRTUAL_AB" = "true" ]; then
         cmd+=" --virtual-ab"
         echo -e "${BLUE}Using virtual A/B partition layout (groups share physical space).${RESET}"
     fi
-    
+
     echo -e "\n${BLUE}Calculating new partition sizes and building command...${RESET}"
 
     if [ -z "$LP_GROUPS" ]; then
@@ -272,7 +272,7 @@ run_repack() {
         # Calculate partition sizes
         for part in $partitions; do
             local part_img="${session_dir}/${part}.img"
-            [ ! -f "$part_img" ] && { 
+            [ ! -f "$part_img" ] && {
                 echo -e "${RED}Error: Repacked image '${part_img}' not found!${RESET}"
                 echo -e "${RED}Expected partition image for: ${BOLD}${part}${RESET}"
                 exit 1
@@ -286,7 +286,7 @@ run_repack() {
 
             partition_sizes[$part]=$size
         done
-        
+
         # All groups use the maximum possible size (not sum of partitions)
         group_sizes[$group]=$max_group_size
     done
@@ -299,10 +299,10 @@ run_repack() {
         local group_partitions_var="LP_GROUP_${group}_PARTITIONS"
         local partitions="${!group_partitions_var}"
         [ -z "$partitions" ] && continue
-        
+
         cmd+=" --group ${group}:${group_sizes[$group]}"
         [ "${group_sizes[$group]}" -gt "$total_partitions_size" ] && total_partitions_size=${group_sizes[$group]}
-        
+
         for part in $partitions; do
             cmd+=" --partition ${part}:none:${partition_sizes[$part]}:${group}"
             # Sum up all partition sizes (including 0-byte partitions) for validation
@@ -314,14 +314,14 @@ run_repack() {
             fi
         done
     done
-    
+
     # Validate that sum of all partition sizes doesn't exceed max group size
     if [ "$total_all_partitions_size" -gt "$max_group_size" ]; then
         local total_hr
         total_hr=$(numfmt --to=iec-i --suffix=B "$total_all_partitions_size")
         local max_group_hr
         max_group_hr=$(numfmt --to=iec-i --suffix=B "$max_group_size")
-        
+
         echo -e "\n${RED}${BOLD}FATAL ERROR: The combined size of your repacked partitions is larger than the maximum group size can hold.${RESET}"
         echo -e "  - Total Partition Size: ${YELLOW}${total_hr}${RESET}"
         echo -e "  - Maximum Group Size:  ${YELLOW}${max_group_hr}${RESET}"
@@ -333,17 +333,17 @@ run_repack() {
         cmd+=" --sparse"
     fi
     cmd+=" --output ${output_image}"
-    
+
     echo -e "\n${BOLD}Executing command:${RESET}"
     echo -e "$cmd\n"
-    
+
     eval "$cmd"
-    
+
     # Transfer ownership to actual user if running under sudo
     if [ -n "$SUDO_USER" ] && [ -f "$output_image" ]; then
         chown "$SUDO_USER:$SUDO_USER" "$output_image"
     fi
-    
+
     echo -e "\n${GREEN}${BOLD}Repack successful!${RESET}"
 }
 

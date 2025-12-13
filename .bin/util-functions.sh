@@ -52,16 +52,16 @@ check_dependencies() {
             missing_pkgs+=("$pkg")
         fi
     done
-    
+
     # Check for erofs-utils with FUSE support
     if ! command -v mkfs.erofs &>/dev/null || ! command -v erofsfuse &>/dev/null; then
         erofs_utils_missing=true
     fi
-    
+
     if [ ${#missing_pkgs[@]} -eq 0 ] && [ "$erofs_utils_missing" = false ]; then
         return 0 # All dependencies are present, exit silently
     fi
-    
+
     # If we reach here, some dependencies are missing.
     clear
     print_banner
@@ -71,7 +71,7 @@ check_dependencies() {
         echo -e "${RED}Fedora Based host found...${RESET}"
     fi
     echo -e "\n${RED}${BOLD}Warning: Missing required dependencies.${RESET}"
-    
+
     if [ ${#missing_pkgs[@]} -gt 0 ]; then
         echo -e "\n${YELLOW}The following packages are missing:${RESET}"
         echo "  - ${missing_pkgs[*]}"
@@ -82,11 +82,11 @@ check_dependencies() {
     fi
 
     read -rp "$(echo -e "\n${BLUE}Do you want to attempt automatic installation? (y/N): ${RESET}")" choice
-    
+
     if [[ "$choice" =~ ^[Yy]$ ]]; then
         echo -e "\n${BLUE}Starting automatic installation...${RESET}"
         set -e
-        
+
         if [ ${#missing_pkgs[@]} -gt 0 ]; then
             local unique_pkgs=$(echo "${missing_pkgs[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' ')
             echo -e "\n${BLUE}Updating package lists...${RESET}"
@@ -109,7 +109,7 @@ check_dependencies() {
             rm -rf "$erofs_tmp_dir"
             echo -e "${GREEN}'erofs-utils' installed successfully.${RESET}"
         fi
-        
+
         set +e
         echo -e "\n${GREEN}${BOLD}[✓] All dependencies should now be installed.${RESET}"
         read -rp "Press Enter to continue..."

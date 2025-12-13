@@ -21,11 +21,11 @@ jobs:
         run: |
           # Set the zip file name as an environment variable for reuse
           echo "ZIP_NAME=Android_Image_Tools_${{ github.event.inputs.version }}.zip" >> $GITHUB_ENV
-          
+
           # Clean the repository for packaging
           rm -rf .git*
           find . -name ".gitkeep" -delete
-          
+
           # Create a version file
           echo "${{ github.event.inputs.version }}: https://github.com/${{ github.repository }}/releases/tag/${{ github.event.inputs.version }}" > VERSION.TXT
 

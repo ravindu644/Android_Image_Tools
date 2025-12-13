@@ -44,12 +44,12 @@ sudo_cleanup_temp_dirs() {
 cleanup_and_exit() {
     tput cnorm
     sudo_cleanup_temp_dirs
-    
+
     # Restore original SELinux status
     if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
         setenforce 1 2>/dev/null || true
     fi
-    
+
     echo -e "\n${YELLOW}Exiting Android Image Tools.${RESET}"
     exit 130
 }
@@ -120,16 +120,16 @@ display_final_image_size() {
 is_empty_partition() {
     local image_path="$1"
     [ ! -f "$image_path" ] && return 1
-    
+
     local file_size
     file_size=$(stat -c%s "$image_path" 2>/dev/null)
-    
+
     # 0-byte files are definitely empty
     [ "$file_size" -eq 0 ] && return 0
-    
+
     # Files reported as "empty" by the file command
     file "$image_path" 2>/dev/null | grep -q "empty" && return 0
-    
+
     # For small files (<= 4096 bytes), check if they are all zeros
     if [ "$file_size" -le 4096 ]; then
         local temp_zero
@@ -182,19 +182,19 @@ select_option() {
     local current=0
     local is_first_iteration=true
     local options_height=${#options[@]}
-    
+
     tput civis
     if [ "$no_clear" = false ]; then
         clear
         print_banner
     fi
     echo -e "\n${BOLD}${header}${RESET}\n"
-    
+
     while true; do
         if [ "$is_first_iteration" = false ]; then
             tput cuu "$options_height"
         fi
-        
+
         for i in "${!options[@]}"; do
             tput el
             local option_text="${options[$i]}"
@@ -202,7 +202,7 @@ select_option() {
             if [[ "$option_text" == "Cleanup Workspace" || "$option_text" == "Yes, DELETE EVERYTHING" ]]; then
                 is_danger=true
             fi
-            
+
             if [ $i -eq $current ]; then
                 if [ "$is_danger" = true ]; then
                     echo -e "  ${RED}▶ $option_text${RESET}"
@@ -213,7 +213,7 @@ select_option() {
                 echo -e "    $option_text"
             fi
         done
-        
+
         is_first_iteration=false
         read -rsn1 key
         if [[ "$key" == $'\x1b' ]]; then
@@ -226,7 +226,7 @@ select_option() {
             break
         fi
     done
-    
+
     tput cnorm
     AIT_CHOICE_INDEX=$current
 }
@@ -259,50 +259,50 @@ select_item() {
             find_args=\( -type f -o -type d \)
             ;;
     esac
-    
+
     while IFS= read -r item; do
         items+=("$(basename "$item")")
     done < <(find "$search_path" -mindepth 1 -maxdepth 1 "${find_args[@]}" 2>/dev/null)
-    
+
     if [ ${#items[@]} -eq 0 ]; then
         clear; print_banner
         echo -e "\n${YELLOW}Warning: No items of type '${item_type}' found in '${search_path}'.${RESET}"
         read -rp $'\nPress Enter to return...'
         return 1
     fi
-    
+
     if [ "$add_back_option" = true ]; then
         items+=("Back")
     fi
     select_option "$header" "${items[@]}"
-    
+
     if [ "$add_back_option" = true ] && [ "$AIT_CHOICE_INDEX" -eq $((${#items[@]} - 1)) ]; then
         return 1
     fi
-    
+
     AIT_SELECTED_ITEM="${search_path}/${items[$AIT_CHOICE_INDEX]}"
     return 0
 }
 
 export_repack_config() {
     local source_dir="$1" output_image="$2" fs="$3" repack_mode="$4" erofs_comp="$5" erofs_level="$6" create_sparse="$7" overhead_percent="$8"
-    
+
     mkdir -p "$SCRIPT_DIR/CONFIGS"
     clear; print_banner
-    
+
     local partition_name
     partition_name=$(basename "$source_dir" | sed 's/^extracted_//')
     local default_conf_name="${partition_name}_repack.conf"
-    
+
     read -rp "$(echo -e ${BLUE}"Enter filename for preset [${BOLD}${default_conf_name}${BLUE}]: "${RESET})" conf_filename
     conf_filename=${conf_filename:-$default_conf_name}
-    
+
     local final_conf_path="$SCRIPT_DIR/CONFIGS/$conf_filename"
     local full_source_path
     full_source_path=$(realpath "$source_dir")
     local full_output_path
     full_output_path="$(realpath "$(dirname "$output_image")")/$(basename "$output_image")"
-    
+
     {
         echo "# --- Android Image Tools Repack Configuration ---"
         echo "ACTION=repack"
@@ -310,7 +310,7 @@ export_repack_config() {
         echo "OUTPUT_IMAGE=$full_output_path"
         echo "FILESYSTEM=$fs"
         echo "CREATE_SPARSE_IMAGE=$create_sparse"
-        
+
         if [ "$fs" == "erofs" ]; then
             echo "COMPRESSION_MODE=${erofs_comp:-none}"
             if [[ "$erofs_comp" == "lz4hc" || "$erofs_comp" == "deflate" ]]; then
@@ -323,7 +323,7 @@ export_repack_config() {
             fi
         fi
     } > "$final_conf_path"
-    
+
     echo -e "\n${GREEN}${BOLD}[✓] Settings successfully exported to '${final_conf_path}'.${RESET}"
     read -rp $'\nPress Enter to return to the summary...'
 }
@@ -388,26 +388,26 @@ export_super_unpack_config() {
 
 cleanup_workspace() {
     clear; print_banner
-    
+
     local total_bytes=0
     local dirs_to_scan=("${WORKSPACE_DIRS[@]}" "CONFIGS" ".tmp")
     local workspace_bytes
     workspace_bytes=$(du -sb "${dirs_to_scan[@]/#/$SCRIPT_DIR/}" 2>/dev/null | awk '{s+=$1} END {print s}')
     total_bytes=$((total_bytes + ${workspace_bytes:-0}))
-    
+
     local total_size
     total_size=$(numfmt --to=iec-i --suffix=B --padding=7 "$total_bytes")
-    
+
     echo -e "\n${RED}${BOLD}WARNING: IRREVERSIBLE ACTION${RESET}"
     echo -e "${YELLOW}You are about to permanently delete all files in the workspace and all related temporary files.${RESET}"
     echo -e "\n  - ${BOLD}Total space to be reclaimed: ${YELLOW}$total_size${RESET}"
-    
+
     select_option "Are you sure you want to proceed?" "Yes, DELETE EVERYTHING" "No, take me back" --no-clear
-    
+
     if [ "$AIT_CHOICE_INDEX" -ne 0 ]; then
         echo -e "\n${GREEN}Cleanup cancelled.${RESET}"; sleep 1; return
     fi
-    
+
     echo -e "\n${BLUE}Cleaning workspace directories...${RESET}"
     for dir in "${dirs_to_scan[@]}"; do
         if [ -d "$SCRIPT_DIR/$dir" ]; then
@@ -415,7 +415,7 @@ cleanup_workspace() {
             find "$SCRIPT_DIR/$dir" -mindepth 1 -not -name '.gitkeep' -exec rm -rf {} + 2>/dev/null || true
         fi
     done
-    
+
     echo -e "\n${GREEN}${BOLD}[✓] Workspace and temporary files have been cleaned.${RESET}"
     read -rp $'\nPress Enter to return to the main menu...'
 }
@@ -426,7 +426,7 @@ run_unpack_interactive() {
     local input_image
     local output_dir
     local step=1
-    
+
     while true; do
         case $step in
             1)
@@ -459,7 +459,7 @@ run_unpack_interactive() {
                     step=1
                     continue
                 fi
-                
+
                 echo -e "\n${RED}${BOLD}Starting unpack. DO NOT INTERRUPT...${RESET}\n"
                 trap '' INT
                 local quiet_flag=""
@@ -469,7 +469,7 @@ run_unpack_interactive() {
                 local unpack_exit_code=$?
                 set -e  # Re-enable exit on error
                 trap 'cleanup_and_exit' INT TERM EXIT
-                
+
                 if [ $unpack_exit_code -ne 0 ]; then
                     echo -e "\n${RED}${BOLD}Unpack failed. Please check the errors above.${RESET}"
                 else
@@ -541,10 +541,10 @@ run_repack_interactive() {
                 if [ "$fs" == "erofs" ]; then echo -e "  - ${YELLOW}EROFS Compression:${RESET}  $erofs_comp"; if [ -n "$erofs_level" ]; then echo -e "  - ${YELLOW}EROFS Level:${RESET}        ${erofs_level:-default}"; fi; else echo -e "  - ${YELLOW}EXT4 Mode:${RESET}        $repack_mode"; if [ "$repack_mode" == "flexible" ]; then echo -e "  - ${YELLOW}EXT4 Overhead:${RESET}      ${overhead_percent}%"; fi; fi
                 echo -e "  - ${YELLOW}Create Sparse IMG:${RESET}  $create_sparse"; select_option "What would you like to do?" "Proceed" "Export selected settings" "Back" --no-clear;
                 case $AIT_CHOICE_INDEX in 0) ;; 1) export_repack_config "$source_dir" "$output_image" "$fs" "$repack_mode" "$erofs_comp" "$erofs_level" "$create_sparse" "$overhead_percent"; step=6; continue;; 2) step=5; continue;; esac
-                
+
                 echo -e "\n${RED}${BOLD}Starting repack. DO NOT INTERRUPT...${RESET}"; trap '' INT; local repack_args=("--fs" "$fs")
                 if [ "$fs" == "erofs" ]; then repack_args+=("--erofs-compression" "$erofs_comp"); if [ -n "$erofs_level" ]; then repack_args+=("--erofs-level" "$erofs_level"); fi; else repack_args+=("--ext4-mode" "$repack_mode"); if [ "$repack_mode" == "flexible" ]; then repack_args+=("--ext4-overhead-percent" "$overhead_percent"); fi; fi
-                
+
                 local quiet_flag=""
                 [ "$quiet_mode" = true ] && quiet_flag="--quiet"
                 set +e  # Disable exit on error to check exit code
@@ -552,7 +552,7 @@ run_repack_interactive() {
                 local repack_exit_code=$?
                 set -e  # Re-enable exit on error
                 trap 'cleanup_and_exit' INT TERM EXIT
-                
+
                 local final_image_path="$output_image"
                 if [ $repack_exit_code -eq 0 ] && [ -f "$output_image" ]; then
                     if [ "$create_sparse" = true ]; then
@@ -644,7 +644,7 @@ run_super_unpack_interactive() {
     local all_partitions=()
     local partitions_to_unpack=()
     local empty_partitions=()
-    
+
     while IFS= read -r item; do
         all_partitions+=("$item")
         local part_img="${logical_dir}/${item}.img"
@@ -742,46 +742,46 @@ run_super_create_config_interactive() {
     select_item "Select project to finalize configuration:" "SUPER_TOOLS" "dir"
     if [ $? -ne 0 ]; then return; fi
     project_dir="$AIT_SELECTED_ITEM"
-    
+
     metadata_dir="${project_dir}/.metadata"
     final_config_file="${project_dir}/project.conf"
 
     if [ ! -f "${metadata_dir}/partition_list.txt" ] || [ ! -f "${metadata_dir}/super_repack_info.txt" ]; then
         echo -e "\n${RED}Error: Core metadata is missing for this project. Cannot configure.${RESET}"; sleep 2; return
     fi
-    
+
     local partition_list
     readarray -t partition_list < "${metadata_dir}/partition_list.txt"
-    
+
     # Read empty partitions list if it exists
     local empty_partitions_file="${metadata_dir}/empty_partitions.txt"
     local empty_partitions=()
     read_empty_partitions "$empty_partitions_file" empty_partitions
-    
+
     # Build associative array for O(1) lookup
     local -A empty_map
     for empty_part in "${empty_partitions[@]}"; do
         empty_map["$empty_part"]=1
     done
-    
+
     # Filter out empty partitions from configuration
     local partitions_to_configure=()
     for part_name in "${partition_list[@]}"; do
         [ -z "${empty_map[$part_name]}" ] && partitions_to_configure+=("$part_name")
     done
-    
+
     if [ ${#empty_partitions[@]} -gt 0 ]; then
         echo -e "\n${BLUE}Found ${BOLD}${#empty_partitions[@]}${RESET} empty partition(s): ${YELLOW}${empty_partitions[*]}${RESET}"
         echo -e "${BLUE}Empty partitions will be skipped during configuration (they don't need filesystem settings).${RESET}"
         read -rp $'\nPress Enter to continue...'
     fi
-    
+
     declare -A config_lines
-    
+
     local current_index=0
     while [ "$current_index" -lt "${#partitions_to_configure[@]}" ]; do
         local part_name=${partitions_to_configure[$current_index]}
-        
+
         local mount_method=""
         load_metadata "${project_dir}/extracted_content/${part_name}/.repack_info/metadata.txt"
         mount_method="$MOUNT_METHOD"
@@ -858,13 +858,13 @@ run_super_create_config_interactive() {
             fi
         done
     done
-    
+
     clear; print_banner
     echo -e "\n${BOLD}Final Configuration Step${RESET}"
     select_option "Enable detailed, real-time logs during super repack?" \
         "Yes (Recommended for debugging)" \
         "No (Show a clean spinner)"
-    
+
     local enable_verbose_logs="false"
     if [ "$AIT_CHOICE_INDEX" -eq 0 ]; then
         enable_verbose_logs="true"
@@ -876,7 +876,7 @@ run_super_create_config_interactive() {
     if [ "$AIT_CHOICE_INDEX" -eq 1 ]; then
         create_sparse_image="false"
     fi
-    
+
     {
         echo "# --- Universal Repack Configuration ---"
         echo "# Project: $(basename "$project_dir")"
@@ -909,7 +909,7 @@ run_super_create_config_interactive() {
         fi
         echo ""
     done
-    
+
     # Add comment for empty partitions if any exist
     if [ ${#empty_partitions[@]} -gt 0 ]; then
         echo "# Empty partitions (will be recreated as empty files during repack):"
@@ -935,7 +935,7 @@ run_super_repack_interactive() {
     select_item "Select project to repack:" "SUPER_TOOLS" "dir"
     if [ $? -ne 0 ]; then return; fi
     project_dir="$AIT_SELECTED_ITEM"
-    
+
     metadata_dir="${project_dir}/.metadata"
     logical_dir="${project_dir}/logical_partitions"
     extracted_dir="${project_dir}/extracted_content"
@@ -946,15 +946,15 @@ run_super_repack_interactive() {
         echo -e "Please run 'Finalize Project Configuration' for this project first."
         sleep 3; return
     fi
-    
+
     source "$part_config_file"
-    
+
     clear; print_banner
     local default_output_image="$SCRIPT_DIR/REPACKED_IMAGES/super_$(basename "$project_dir").img"
     read -rp "$(echo -e ${BLUE}"Enter path for final super image [${BOLD}${default_output_image}${BLUE}]: "${RESET})" output_image
     output_image="$(echo "$output_image" | tr -d "\"'")"
     output_image=${output_image:-$default_output_image}
-    
+
     local sparse_flag=""
     [ "${CREATE_SPARSE_IMAGE:-true}" = "false" ] && sparse_flag="--raw"
 
@@ -963,27 +963,27 @@ run_super_repack_interactive() {
     echo -e "\n${RED}${BOLD}Starting full super repack. This will take a long time...${RESET}"
     trap '' INT
     set -e
-    
+
     mkdir -p "$logical_dir"
-    
+
     # Read empty partitions list if it exists
     local empty_partitions_file="${metadata_dir}/empty_partitions.txt"
     local empty_partitions=()
     read_empty_partitions "$empty_partitions_file" empty_partitions
-    
+
     # Build associative array for O(1) lookup
     local -A empty_map
     for empty_part in "${empty_partitions[@]}"; do
         empty_map["$empty_part"]=1
     done
-    
+
     set +e # Disable exit on error for the loop
     # Filter out empty partitions from PARTITION_LIST for repacking
     local partitions_to_repack=()
     for part_name in $PARTITION_LIST; do
         [ -z "${empty_map[$part_name]}" ] && partitions_to_repack+=("$part_name")
     done
-    
+
     local total=${#partitions_to_repack[@]}
     local empty_count=${#empty_partitions[@]}
     local current=0
@@ -1002,14 +1002,14 @@ run_super_repack_interactive() {
         for part_name in "${partitions_to_repack[@]}"; do
         current=$((current + 1))
         local fs_var="${part_name^^}_FS"; local fs="${!fs_var}"
-        
+
         if [ -z "$fs" ]; then
             echo -e "\n${RED}${BOLD}ERROR: Filesystem not configured for partition '${part_name}'.${RESET}"
             echo -e "${RED}${BOLD}Please run 'Finalize Project Configuration' for this project.${RESET}"
             all_successful=false
             break
         fi
-        
+
         # Check mount_method to prevent FUSE + EXT4 incompatibility
         local mount_method=""
         load_metadata "${project_dir}/extracted_content/${part_name}/.repack_info/metadata.txt"
@@ -1021,7 +1021,7 @@ run_super_repack_interactive() {
             all_successful=false
             break
         fi
-        
+
         local repack_args=("--fs" "$fs")
         if [ "$fs" == "erofs" ]; then
             local comp_var="${part_name^^}_EROFS_COMPRESSION"; local level_var="${part_name^^}_EROFS_LEVEL"
@@ -1034,18 +1034,18 @@ run_super_repack_interactive() {
                 repack_args+=("--ext4-overhead-percent" "${!percent_var}")
             fi
         fi
-        
+
         # Use project config ENABLE_VERBOSE_LOGS first, then fallback to command line quiet_mode
         local use_verbose_logs="${ENABLE_VERBOSE_LOGS:-false}"
         if [ "$use_verbose_logs" != "true" ] && [ "$quiet_mode" = true ]; then
             use_verbose_logs="false"
         fi
-        
+
         if [ "$use_verbose_logs" == "true" ]; then
             # --- VERBOSE LOGGING PATH ---
             echo -e "\n${YELLOW}--- (${current}/${total}) Repacking: ${BOLD}${part_name}${RESET} ---${RESET}"
             bash "$REPACK_SCRIPT_PATH" "${project_dir}/extracted_content/${part_name}" "${logical_dir}/${part_name}.img" "${repack_args[@]}" --no-banner
-            
+
             if [ $? -ne 0 ]; then
                 echo -e "${RED}--- [✗] FAILED: ${BOLD}${part_name}${RESET} repack failed. See logs above. ---${RESET}"
                 all_successful=false
@@ -1082,7 +1082,7 @@ run_super_repack_interactive() {
         read -rp $'\nPress Enter to return...'
         return
     fi
-    
+
     # Create empty partition files before final assembly
     # Create 0-byte files - super-tools.sh will handle them correctly:
     # - For virtual-ab images: kept as 0 bytes
@@ -1095,13 +1095,13 @@ run_super_repack_interactive() {
             echo -e "${GREEN}[✓] Created empty file: ${BOLD}${empty_part}.img${RESET}"
         done
     fi
-    
+
     echo -e "\n${BLUE}--- Assembling final super image ---${RESET}"
-    
+
     # Keep set +e active to allow error checking
     bash "$SUPER_SCRIPT_PATH" repack "$logical_dir" "$output_image" "$sparse_flag" --no-banner
     local repack_exit_code=$?
-    
+
     # Check the exit code explicitly
     if [ $repack_exit_code -ne 0 ]; then
         echo -e "\n${RED}${BOLD}FATAL: Failed to assemble the final super image. Please check the errors above.${RESET}"
@@ -1110,13 +1110,13 @@ run_super_repack_interactive() {
         read -rp $'\nPress Enter to return...'
         return
     fi
-    
+
     rm -rf "$logical_dir"
     trap 'cleanup_and_exit' INT TERM EXIT
-    
+
     # Transfer ownership to actual user
     [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$output_image"
-    
+
     echo -e "\n${GREEN}${BOLD}Super repack successful!${RESET}"
     echo -e "  - Final image: ${BOLD}$output_image${RESET}"
     display_final_image_size "$output_image"
@@ -1128,7 +1128,7 @@ run_super_kitchen_menu() {
         clear; print_banner
         local kitchen_options=("Unpack a Super Image" "Finalize Project Configuration" "Repack a Project from Configuration" "Back to Main Menu")
         select_option "Super Image Kitchen:" "${kitchen_options[@]}"
-        
+
         case $AIT_CHOICE_INDEX in
             0) run_super_unpack_interactive "$QUIET_MODE" ;;
             1) run_super_create_config_interactive ;;
@@ -1143,7 +1143,7 @@ run_advanced_tools_menu() {
         clear; print_banner
         local advanced_options=("Super Image Kitchen" "Back to Main Menu")
         select_option "Advanced Tools:" "${advanced_options[@]}"
-        
+
         case $AIT_CHOICE_INDEX in
             0) run_super_kitchen_menu ;;
             1) break ;;
@@ -1167,7 +1167,7 @@ run_non_interactive() {
         if [[ "$input_image" != /* ]]; then input_image="$SCRIPT_DIR/INPUT_IMAGES/$input_image"; fi
         if [[ "$extract_dir" != /* ]]; then extract_dir="$SCRIPT_DIR/EXTRACTED_IMAGES/$extract_dir"; fi
         if [ -z "$input_image" ] || [ -z "$extract_dir" ]; then echo -e "${RED}Error: INPUT_IMAGE/EXTRACT_DIR not set.${RESET}"; exit 1; fi
-        
+
         echo -e "\n${BOLD}Unpack Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $input_image\n  - ${YELLOW}Output Directory:${RESET} $extract_dir"
         local quiet_flag=""
         [ "$quiet_mode" = true ] && quiet_flag="--quiet"
@@ -1179,7 +1179,7 @@ run_non_interactive() {
         if [[ "$source_dir" != /* ]]; then source_dir="$SCRIPT_DIR/EXTRACTED_IMAGES/$source_dir"; fi
         if [[ "$output_image" != /* ]]; then output_image="$SCRIPT_DIR/REPACKED_IMAGES/$output_image"; fi
         if [ -z "$source_dir" ] || [ -z "$output_image" ] || [ -z "$fs" ]; then echo -e "${RED}Error: SOURCE_DIR/OUTPUT_IMAGE/FILESYSTEM not set.${RESET}"; exit 1; fi
-        
+
         local mount_method=""
         load_metadata "${source_dir}/.repack_info/metadata.txt"
         mount_method="${MOUNT_METHOD}"
@@ -1190,7 +1190,7 @@ run_non_interactive() {
             exit 1
         fi
         local repack_args=("--fs" "$fs"); local create_sparse="${CONFIG[CREATE_SPARSE_IMAGE]:-true}"; local erofs_comp="${CONFIG[COMPRESSION_MODE]}"; local erofs_level="${CONFIG[COMPRESSION_LEVEL]}"; local ext4_mode="${CONFIG[MODE]}"
-        
+
         echo -e "\n${BOLD}Repack Summary:${RESET}\n  - ${YELLOW}Source Directory:${RESET} $source_dir\n  - ${YELLOW}Output Image:${RESET}     $output_image\n  - ${YELLOW}Filesystem:${RESET}       $fs"
         if [ "$fs" == "erofs" ]; then
             [ -n "$erofs_comp" ] && repack_args+=("--erofs-compression" "$erofs_comp"); [ -n "$erofs_level" ] && repack_args+=("--erofs-level" "$erofs_level")
@@ -1205,8 +1205,8 @@ run_non_interactive() {
             fi
         fi
         echo -e "  - ${YELLOW}Create Sparse IMG:${RESET}  $create_sparse"
-        
-        echo -e "\n${RED}${BOLD}Starting repack. DO NOT INTERRUPT...${RESET}"; 
+
+        echo -e "\n${RED}${BOLD}Starting repack. DO NOT INTERRUPT...${RESET}";
         local quiet_flag=""
         [ "$quiet_mode" = true ] && quiet_flag="--quiet"
         bash "$REPACK_SCRIPT_PATH" "$source_dir" "$output_image" "${repack_args[@]}" --no-banner $quiet_flag
@@ -1223,53 +1223,53 @@ run_non_interactive() {
         else
             echo -e "\n${RED}${BOLD}Repack failed.${RESET}"
         fi
-        
+
     # --- NEW: Non-interactive super unpack ---
     elif [ "$ACTION" == "super_unpack" ]; then
         local input_image="${CONFIG[INPUT_IMAGE]}"
         local project_name="${CONFIG[PROJECT_NAME]}"
         if [[ "$input_image" != /* ]]; then input_image="$SCRIPT_DIR/INPUT_IMAGES/$input_image"; fi
         if [ -z "$input_image" ] || [ -z "$project_name" ]; then echo -e "${RED}Error: INPUT_IMAGE/PROJECT_NAME not set.${RESET}"; exit 1; fi
-        
+
         local project_dir="$SCRIPT_DIR/SUPER_TOOLS/$project_name"
         if [ -d "$project_dir" ]; then echo -e "${RED}Error: Project '$project_name' already exists.${RESET}"; exit 1; fi
 
         echo -e "\n${BOLD}Super Unpack Summary:${RESET}\n  - ${YELLOW}Input Image:${RESET} $input_image\n  - ${YELLOW}Project Name:${RESET} $project_name"
         echo -e "\n${RED}${BOLD}Starting super unpack...${RESET}"
 
-        # Mirror the interactive logic        
+        # Mirror the interactive logic
         mkdir -p "$project_dir/.metadata" "$project_dir/logical_partitions" "$project_dir/extracted_content"
         bash "$SUPER_SCRIPT_PATH" unpack "$input_image" "$project_dir/logical_partitions" --no-banner &>/dev/null
         if [ $? -ne 0 ]; then
             echo -e "${RED}${BOLD}Error: Failed to unpack super image.${RESET}" >&2
             exit 1
         fi
-        
+
         local metadata_dir="$project_dir/.metadata"
         local partition_list_file="${metadata_dir}/partition_list.txt"
         local empty_partitions_file="${metadata_dir}/empty_partitions.txt"
         touch "$partition_list_file" "$empty_partitions_file"
-        
+
         # Collect all partition images first (avoid subshell issues)
         local all_partition_images=()
         while IFS= read -r logical_img; do
             all_partition_images+=("$logical_img")
         done < <(find "$project_dir/logical_partitions" -maxdepth 1 -type f -name '*.img' ! -name 'super.raw.img')
-        
+
         # Check if this is a virtual-AB image
         local is_virtual_ab=false
         if [ -f "${metadata_dir}/super_repack_info.txt" ]; then
             load_metadata "${metadata_dir}/super_repack_info.txt"
             [ "${VIRTUAL_AB:-false}" = "true" ] && is_virtual_ab=true
         fi
-        
+
         # Detect empty partitions and separate them
         local empty_count=0
         for logical_img in "${all_partition_images[@]}"; do
             local part_name
             part_name=$(basename "$logical_img" .img)
             echo "$part_name" >> "$partition_list_file"
-            
+
             if is_empty_partition "$logical_img"; then
                 echo "$part_name" >> "$empty_partitions_file"
                 empty_count=$((empty_count + 1))
@@ -1285,7 +1285,7 @@ run_non_interactive() {
                 fi
             fi
         done
-        
+
         # Show concise message about empty partitions
         if [ "$empty_count" -gt 0 ]; then
             if [ "$is_virtual_ab" = true ]; then
@@ -1304,26 +1304,26 @@ run_non_interactive() {
         if [ -z "$project_name" ] || [ -z "$output_image" ]; then echo -e "${RED}Error: PROJECT_NAME/OUTPUT_IMAGE not set.${RESET}"; exit 1; fi
         local project_dir="$SCRIPT_DIR/SUPER_TOOLS/$project_name"; local final_config_file="${project_dir}/project.conf"
         if [ ! -f "$final_config_file" ]; then echo -e "${RED}Error: 'project.conf' not found in '$project_dir'.${RESET}"; exit 1; fi
-        
+
         source "$final_config_file"
         echo -e "\n${BOLD}Super Repack Summary:${RESET}\n  - ${YELLOW}Project:${RESET} $project_name\n  - ${YELLOW}Output Image:${RESET} $output_image"
         echo -e "\n${RED}${BOLD}Starting super repack...${RESET}"
-        
+
         local logical_dir="${project_dir}/logical_partitions"
         local metadata_dir="${project_dir}/.metadata"
         mkdir -p "$logical_dir"
-        
+
         # Read empty partitions list if it exists
         local empty_partitions_file="${metadata_dir}/empty_partitions.txt"
         local empty_partitions=()
         read_empty_partitions "$empty_partitions_file" empty_partitions
-        
+
         # Build associative array for O(1) lookup
         local -A empty_map
         for empty_part in "${empty_partitions[@]}"; do
             empty_map["$empty_part"]=1
         done
-        
+
         # Filter out empty partitions and repack only non-empty ones
         local repack_failed=false
         for part_name in $PARTITION_LIST; do
@@ -1359,16 +1359,16 @@ run_non_interactive() {
                     repack_args+=("--ext4-overhead-percent" "${!percent_var}")
                 fi
             fi
-            
+
             # Use project config ENABLE_VERBOSE_LOGS first, then fallback to command line quiet_mode
             local use_verbose_logs="${ENABLE_VERBOSE_LOGS:-false}"
             if [ "$use_verbose_logs" != "true" ] && [ "$quiet_mode" = true ]; then
                 use_verbose_logs="false"
             fi
-            
+
             local quiet_flag=""
             [ "$quiet_mode" = true ] && quiet_flag="--quiet"
-            
+
             if [ "$use_verbose_logs" == "true" ]; then
                 # Verbose mode: show output
                 echo -e "\n${YELLOW}--- Repacking: ${BOLD}${part_name}${RESET} ---${RESET}"
@@ -1377,7 +1377,7 @@ run_non_interactive() {
                 # Quiet mode: suppress output
                 bash "$REPACK_SCRIPT_PATH" "$project_dir/extracted_content/${part_name}" "$logical_dir/${part_name}.img" "${repack_args[@]}" --no-banner $quiet_flag &>/dev/null
             fi
-            
+
             if [ $? -ne 0 ]; then
                 if [ "$use_verbose_logs" == "true" ]; then
                     echo -e "${RED}--- [✗] FAILED: ${BOLD}${part_name}${RESET} repack failed. See logs above. ---${RESET}" >&2
@@ -1388,7 +1388,7 @@ run_non_interactive() {
                 break
             fi
         done
-        
+
         if [ "$repack_failed" = true ]; then
             rm -rf "$logical_dir"
             exit 1
@@ -1415,10 +1415,10 @@ run_non_interactive() {
             exit 1
         fi
         rm -rf "$logical_dir"
-        
+
         # Transfer ownership to actual user
         [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$output_image"
-        
+
         echo -e "\n${GREEN}${BOLD}Success: Final image created at: ${output_image}${RESET}"
         display_final_image_size "$output_image"
     else
@@ -1486,11 +1486,11 @@ while true; do
         create_workspace
         WORKSPACE_INITIALIZED=true
     fi
-    
+
     # Main Menu Reordered
     main_options=("Unpack an Android Image" "Repack a Directory" "Generate default.conf file" "Advanced Tools" "Cleanup Workspace" "Exit")
     select_option "Select an action:" "${main_options[@]}"; choice=$AIT_CHOICE_INDEX
-    
+
     case $choice in
         0) run_unpack_interactive "$QUIET_MODE";;
         1) run_repack_interactive "$QUIET_MODE";;

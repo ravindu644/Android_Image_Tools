@@ -131,16 +131,16 @@ cleanup() {
         sync
         umount "$MOUNT_POINT" 2>/dev/null || umount -l "$MOUNT_POINT" 2>/dev/null
     fi
-    
-    # Then remove temporary files        
+
+    # Then remove temporary files
     [ -d "$TEMP_ROOT" ] && rm -rf "$TEMP_ROOT"
     [ -f "$OUTPUT_IMG.tmp" ] && rm -f "$OUTPUT_IMG.tmp"
-    
+
     # Restore original SELinux status
     if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
         setenforce 1 2>/dev/null || true
     fi
-    
+
     if [ "$NO_BANNER" = false ]; then
         echo -e "${GREEN}Cleanup completed.${RESET}"
     fi
@@ -175,7 +175,7 @@ find_matching_pattern() {
         echo "$(grep -E '^/ ' "$config_file" | head -n1)"
         return
     fi
-    
+
     local parent_dir
     parent_dir=$(dirname "$path")
 
@@ -196,7 +196,7 @@ find_matching_pattern() {
         # Go up one level
         parent_dir=$(dirname "$parent_dir")
     done
-    
+
     # As a final fallback, use the root's entry if no other ancestor was found
     echo "$(grep -E '^/ ' "$config_file" | head -n1)"
 }
@@ -204,17 +204,17 @@ find_matching_pattern() {
 restore_attributes() {
     echo -e "\n${BLUE}Initializing permission restoration...${RESET}"
     echo -e "${BLUE}┌─ Analyzing filesystem structure...${RESET}"
-    
+
     # Process symlinks first
     if [ -f "${REPACK_INFO}/symlink_info.txt" ]; then
         while IFS=' ' read -r path target uid gid mode context || [ -n "$path" ]; do
             [ -z "$path" ] && continue
             [[ "$path" =~ ^#.*$ ]] && continue
-            
+
             full_path="$1$path"
             [ ! -L "$full_path" ] && ln -sf "$target" "$full_path"
             chown -h "$uid:$gid" "$full_path" 2>/dev/null || true
-            
+
             # Try to set context from symlink_info, otherwise fall back to file_contexts
             if [ -n "$context" ] && [ "$context" != "?" ]; then
                 setfattr -h -n security.selinux -v "$context" "$full_path" 2>/dev/null || true
@@ -226,7 +226,7 @@ restore_attributes() {
             fi
         done < "${REPACK_INFO}/symlink_info.txt"
     fi
-    
+
     DIR_COUNT=$(find "$1" -type d | wc -l)
     FILE_COUNT=$(find "$1" -type f | wc -l)
     echo -e "${BLUE}├─ Found ${BOLD}$DIR_COUNT${RESET}${BLUE} directories${RESET}"
@@ -244,7 +244,7 @@ restore_attributes() {
         rel_path=${item#$1}
         rel_path_escaped=$(printf '%s' "$rel_path" | sed 's/[.[\*^$()+?{|}]/\\&/g')
         [ -z "$rel_path" ] && rel_path="/"
-        
+
         # Use awk for robust parsing
         stored_attrs=$(grep -E "^${rel_path_escaped} " "$FS_CONFIG_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
         stored_context=$(grep -E "^${rel_path_escaped} " "$FILE_CONTEXTS_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
@@ -255,10 +255,10 @@ restore_attributes() {
             uid=$(echo "$pattern" | awk '{print $2}')
             gid=$(echo "$pattern" | awk '{print $3}')
             mode=$(echo "$pattern" | awk '{print $4}')
-            
+
             chown "${uid:-0}:${gid:-0}" "$item" 2>/dev/null || true
             chmod "${mode:-755}" "$item" 2>/dev/null || true
-            
+
             context_pattern=$(find_matching_pattern "$rel_path" "$FILE_CONTEXTS_FILE")
             context=$(echo "$context_pattern" | awk '{$1=""; print $0}' | sed 's/^ //')
             [ -n "$context" ] && setfattr -n security.selinux -v "$context" "$item" 2>/dev/null || true
@@ -267,12 +267,12 @@ restore_attributes() {
             uid=$(echo "$stored_attrs" | awk '{print $1}')
             gid=$(echo "$stored_attrs" | awk '{print $2}')
             mode=$(echo "$stored_attrs" | awk '{print $3}')
-            
+
             chown "$uid:$gid" "$item" 2>/dev/null || true
             chmod "$mode" "$item" 2>/dev/null || true
             [ -n "$stored_context" ] && setfattr -n security.selinux -v "$stored_context" "$item" 2>/dev/null || true
         fi
-        
+
         if [ "$QUIET" = false ]; then echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Mapping contexts: ${percentage}% (${processed}/${DIR_COUNT})${RESET}"; fi
     done
     echo -e "\r\033[K${GREEN}[✓] Directory attributes mapped${RESET}\n"
@@ -287,7 +287,7 @@ restore_attributes() {
         percentage=$((processed * 100 / FILE_COUNT))
         rel_path=${item#$1}
         rel_path_escaped=$(printf '%s' "$rel_path" | sed 's/[.[\*^$()+?{|}]/\\&/g')
-        
+
         stored_attrs=$(grep -E "^${rel_path_escaped} " "$FS_CONFIG_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
         stored_context=$(grep -E "^${rel_path_escaped} " "$FILE_CONTEXTS_FILE" | head -n1 | awk '{$1=""; print $0}' | sed 's/^ //')
 
@@ -299,7 +299,7 @@ restore_attributes() {
 
             chown "${uid:-0}:${gid:-0}" "$item" 2>/dev/null || true
             chmod 644 "$item" 2>/dev/null || true
-            
+
             context_pattern=$(find_matching_pattern "$rel_path" "$FILE_CONTEXTS_FILE")
             context=$(echo "$context_pattern" | awk '{$1=""; print $0}' | sed 's/^ //')
             [ -n "$context" ] && setfattr -n security.selinux -v "$context" "$item" 2>/dev/null || true
@@ -308,7 +308,7 @@ restore_attributes() {
             uid=$(echo "$stored_attrs" | awk '{print $1}')
             gid=$(echo "$stored_attrs" | awk '{print $2}')
             mode=$(echo "$stored_attrs" | awk '{print $3}')
-            
+
             chown "$uid:$gid" "$item" 2>/dev/null || true
             chmod "$mode" "$item" 2>/dev/null || true
             [ -n "$stored_context" ] && setfattr -n security.selinux -v "$stored_context" "$item" 2>/dev/null || true
@@ -322,31 +322,31 @@ restore_attributes() {
 verify_modifications() {
     local src="$1"
     echo -e "\n${BLUE}Verifying modified files...${RESET}"
-    
+
     # Generate current checksums excluding .repack_info
     local curr_sums="$TMP_DIR/current_checksums.txt"
     (cd "$src" && find . -type f -not -path "./.repack_info/*" -exec sha256sum {} \;) > "$curr_sums"
-    
+
     echo -e "${BLUE}Analyzing changes...${RESET}"
     local modified_files=0
     local total_files=0
     local spin=0
     local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
-    
+
     while IFS= read -r line; do
         total_files=$((total_files + 1))
         checksum=$(echo "$line" | cut -d' ' -f1)
         file=$(echo "$line" | cut -d' ' -f3-)
-        
+
         # Show spinner while processing
         if [ "$QUIET" = false ]; then echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Analyzing files...${RESET}"; fi
-        
+
         if ! grep -q "$checksum.*$file" "${REPACK_INFO}/original_checksums.txt" 2>/dev/null; then
             modified_files=$((modified_files + 1))
             echo -e "\r\033[K${YELLOW}Modified: $file${RESET}"
         fi
     done < "$curr_sums"
-    
+
     # Clear progress line and show summary
     echo -e "\r\033[K${BLUE}Found ${YELLOW}$modified_files${BLUE} modified files out of $total_files total files${RESET}"
     rm -f "$curr_sums"
@@ -366,12 +366,12 @@ show_copy_progress() {
         [ "$current_size" -gt 0 ] && [ "$total_size" -gt 0 ] && percentage=$((current_size * 100 / total_size)) || percentage=0
         current_hr=$(numfmt --to=iec-i --suffix=B "$current_size" 2>/dev/null || echo "0B")
         total_hr=$(numfmt --to=iec-i --suffix=B "$total_size" 2>/dev/null || echo "0B")
-        
+
         # Clear entire line with \033[K before printing
         if [ "$QUIET" = false ]; then echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Copying to work directory: ${percentage}% (${current_hr}/${total_hr})${RESET}"; fi
         sleep 0.1
     done
-    
+
     # Clear line and show completion
     echo -e "\r\033[K${GREEN}[✓] Files copied to work directory${RESET}"
 }
@@ -387,20 +387,20 @@ prepare_working_directory() {
     mkdir -p "$TEMP_ROOT"
     [ -d "$WORK_DIR" ] && rm -rf "$WORK_DIR"
     mkdir -p "$WORK_DIR"
-    
+
     # Copy with SELinux contexts and progress
     echo -e "${BLUE}Copying files to work directory...${RESET}"
     (cd "$EXTRACT_DIR" && tar -cf - .) | (cd "$WORK_DIR" && tar -xf -) &
     show_copy_progress "$EXTRACT_DIR" "$WORK_DIR"
     wait $!
     copy_exit=$?
-    
+
     if [ $copy_exit -ne 0 ]; then
         echo -e "${RED}Error: Failed to copy files to work directory${RESET}"
         cleanup
         exit 1
     fi
-    
+
     verify_modifications "$WORK_DIR"
     restore_attributes "$WORK_DIR"
     remove_repack_info "$WORK_DIR"
@@ -428,7 +428,7 @@ prepare_ext4_features() {
     local original_features="$1"
     local tmp_dummy_img
     tmp_dummy_img=$(mktemp "${TMP_DIR:-/tmp}/dummy_ext4_features_XXXXXX.img" 2>/dev/null || echo "/tmp/dummy_ext4_features_$$.img")
-    
+
     # Create a dummy ext4 image to get default features (silently, no logging)
     dd if=/dev/zero of="$tmp_dummy_img" bs=4096 count=100 2>/dev/null
     mkfs.ext4 -q -F "$tmp_dummy_img" 2>/dev/null
@@ -508,7 +508,7 @@ prepare_ext4_features() {
     # Build mkfs.ext4 -O options string
     local enable_str=""
     local disable_str=""
-    
+
     if [ ${#features_to_enable[@]} -gt 0 ]; then
         enable_str=$(IFS=','; echo "${features_to_enable[*]}")
     fi
@@ -829,7 +829,7 @@ case $FS_CHOICE in
     erofs)
         # EROFS flow - prepare working directory first
         prepare_working_directory
-        
+
         if [ -z "$EROFS_COMP" ]; then
             echo -e "\n${BLUE}${BOLD}Select compression method:${RESET}"
             echo -e "1. none (default)"
@@ -837,7 +837,7 @@ case $FS_CHOICE in
             echo -e "3. lz4hc (level 0-12, default 9)"
             echo -e "4. deflate (level 0-9, default 1)"
             read -p "Enter your choice [1-4]: " comp_choice
-            
+
             case $comp_choice in
               2) EROFS_COMP="lz4" ;;
               3) EROFS_COMP="lz4hc" ;;
@@ -856,7 +856,7 @@ case $FS_CHOICE in
             else
                 COMP_LEVEL="$EROFS_LEVEL"
             fi
-            
+
             if [[ "$COMP_LEVEL" =~ ^([0-9]|1[0-2])$ ]]; then
               COMPRESSION="-zlz4hc,level=$COMP_LEVEL"
             else
@@ -870,7 +870,7 @@ case $FS_CHOICE in
             else
                 COMP_LEVEL="$EROFS_LEVEL"
             fi
-            
+
             if [[ "$COMP_LEVEL" =~ ^[0-9]$ ]]; then
               COMPRESSION="-zdeflate,level=$COMP_LEVEL"
             else
@@ -883,7 +883,7 @@ case $FS_CHOICE in
             echo -e "${BLUE}Using no compression.${RESET}"
             ;;
         esac
-        
+
         MKFS_CMD="mkfs.erofs"
         if [ -n "$COMPRESSION" ]; then
             MKFS_CMD="$MKFS_CMD $COMPRESSION"
@@ -901,7 +901,7 @@ case $FS_CHOICE in
 
         echo -e "${BLUE}Creating EROFS image... This may take some time.${RESET}\n"
         eval $MKFS_CMD
-        
+
         mv "$OUTPUT_IMG.tmp" "$OUTPUT_IMG"
         echo -e "\n${GREEN}${BOLD}Successfully created EROFS image: $OUTPUT_IMG${RESET}"
         echo -e "${BLUE}Image size: $(stat -c %s "$OUTPUT_IMG" | numfmt --to=iec-i --suffix=B)${RESET}\n"
@@ -918,7 +918,7 @@ case $FS_CHOICE in
             read -p "Enter your choice [1-2]: " repack_mode_choice
             [ "$repack_mode_choice" == "1" ] && EXT4_MODE="strict" || EXT4_MODE="flexible"
         fi
-        
+
         # Load metadata first to get variables
         load_metadata "${REPACK_INFO}/metadata.txt"
 
@@ -938,7 +938,7 @@ case $FS_CHOICE in
         fi
 
         CURRENT_CONTENT_SIZE=$(du -sb --exclude=.repack_info "$EXTRACT_DIR" | awk '{print $1}')
-        
+
         if [ "$EXT4_MODE" == "flexible" ]; then
             if [ -z "$EXT4_OVERHEAD_PERCENT" ]; then
                 echo -e "\n${BLUE}${BOLD}Select desired free space overhead:${RESET}"
@@ -947,7 +947,7 @@ case $FS_CHOICE in
                 echo -e "3. Generous (20%)"
                 echo -e "4. Custom"
                 read -p "Enter your choice [1-4, default: 2]: " overhead_choice
-                
+
                 case $overhead_choice in
                     1) EXT4_OVERHEAD_PERCENT=10 ;;
                     3) EXT4_OVERHEAD_PERCENT=20 ;;
@@ -959,7 +959,7 @@ case $FS_CHOICE in
                     *) EXT4_OVERHEAD_PERCENT=15 ;;
                 esac
             fi
-            
+
             create_ext4_flexible "$EXTRACT_DIR" "$OUTPUT_IMG" "$MOUNT_POINT" "$EXT4_OVERHEAD_PERCENT"
 
         else # Strict mode
@@ -970,7 +970,7 @@ case $FS_CHOICE in
 
             if [ "$ORIGINAL_HAS_SHARED_BLOCKS" == "true" ]; then
                 echo -e "\n${YELLOW}${BOLD}Special 'shared_blocks' feature detected. Creating optimized mountable image.${RESET}\n"
-                
+
                 target_blocks=$(calculate_optimal_ext4_size "$EXTRACT_DIR" 10)
                 features_for_mkfs=$(prepare_ext4_features "$(echo "$ORIGINAL_FEATURES" | sed 's/shared_blocks//g')")
 
@@ -985,7 +985,7 @@ case $FS_CHOICE in
                 mount -o loop,rw,seclabel "$OUTPUT_IMG" "$MOUNT_POINT"
             fi
         fi
-        
+
         echo -e "\n${BLUE}Copying files to final image...${RESET}"
         tar_log_file=$(mktemp)
         set +e  # Disable exit on error to catch copy failures
@@ -995,30 +995,30 @@ case $FS_CHOICE in
         wait $tar_pid
         copy_exit_code=$?
         set -e  # Re-enable exit on error
-        
+
         # Check if copy failed due to space issues
         copy_failed=false
         if check_tar_space_error "$copy_exit_code" "$tar_log_file"; then
             copy_failed=true
         fi
-        
+
         # If strict mode copy failed due to space, fall back to resize approach
         if [ "$copy_failed" = true ] && [ "$EXT4_MODE" == "strict" ] && [ "$ORIGINAL_HAS_SHARED_BLOCKS" != "true" ]; then
             echo -e "\n${YELLOW}${BOLD}Warning: Copy failed due to insufficient space in strict mode.${RESET}"
             echo -e "${YELLOW}This can happen due to block allocation differences. Falling back to resize approach...${RESET}\n"
-            
+
             # Unmount and remove the failed image
             sync && umount "$MOUNT_POINT" 2>/dev/null || true
             rm -f "$OUTPUT_IMG"
-            
+
             # Use the shared_blocks approach: create larger image, copy, then resize
             target_blocks=$(calculate_optimal_ext4_size "$EXTRACT_DIR" 10)
             features_for_mkfs=$(prepare_ext4_features "$ORIGINAL_FEATURES")
-            
+
             echo -e "${BLUE}  - Creating temporary well-sized image...${RESET}"
             create_ext4_image_strict "$OUTPUT_IMG" "4096" "$target_blocks" "$features_for_mkfs"
             mount -o loop,rw,seclabel "$OUTPUT_IMG" "$MOUNT_POINT"
-            
+
             # Retry copying with the larger image
             echo -e "${BLUE}  - Copying files to temporary image...${RESET}"
             set +e  # Disable exit on error to check result
@@ -1028,7 +1028,7 @@ case $FS_CHOICE in
             wait $fallback_tar_pid
             fallback_copy_exit=$?
             set -e  # Re-enable exit on error
-            
+
             if [ $fallback_copy_exit -ne 0 ]; then
                 echo -e "\n${RED}${BOLD}Error: Copy failed even with larger image.${RESET}"
                 umount "$MOUNT_POINT" 2>/dev/null || true
@@ -1046,18 +1046,18 @@ case $FS_CHOICE in
             rm -f "$OUTPUT_IMG" "$tar_log_file"
             exit 1
         fi
-        
+
         # Cleanup temp log file
         rm -f "$tar_log_file"
-        
+
         # Verify and restore attributes (for both successful first try and fallback)
         verify_modifications "$MOUNT_POINT"
         restore_attributes "$MOUNT_POINT"
         remove_repack_info "$MOUNT_POINT"
-        
+
         echo -e "${BLUE}Unmounting image...${RESET}"
         sync && umount "$MOUNT_POINT"
-        
+
         # Resize if we used the fallback approach or if shared_blocks mode
         if [ "$EXT4_MODE" == "strict" ]; then
             if [ "$ORIGINAL_HAS_SHARED_BLOCKS" == "true" ] || [ "$copy_failed" = true ]; then
@@ -1067,7 +1067,7 @@ case $FS_CHOICE in
                 resize2fs -M "$OUTPUT_IMG" >/dev/null 2>&1
             fi
         fi
-        
+
         set +e  # Disable exit on error for final e2fsck
         e2fsck -yf "$OUTPUT_IMG" >/dev/null 2>&1
         set -e  # Re-enable exit on error
@@ -1076,7 +1076,7 @@ case $FS_CHOICE in
         echo -e "\n${GREEN}${BOLD}Successfully created EXT4 image: $OUTPUT_IMG${RESET}"
         echo -e "${BLUE}Image size: $(stat -c %s "$OUTPUT_IMG" | numfmt --to=iec-i --suffix=B)${RESET}"
         ;;
-        
+
     *)
         echo -e "${RED}Invalid choice. Exiting.${RESET}"
         exit 1

@@ -115,10 +115,10 @@ if [ "$(stat -c%s "$IMAGE_FILE" 2>/dev/null)" -eq 0 ] || file "$IMAGE_FILE" 2>/d
     echo "MOUNT_METHOD=none"
     echo "IS_EMPTY_PARTITION=true"
   } > "${REPACK_INFO}/metadata.txt"
-  
+
   # Strip <none> values from metadata file (replace =<none> with =)
   sed -i 's/=<none>$/=/' "${REPACK_INFO}/metadata.txt"
-  
+
   [ "$INTERACTIVE_MODE" = true ] && echo -e "${GREEN}${BOLD}[✓] Empty partition marker created.${RESET}"
   exit 0
 fi
@@ -136,12 +136,12 @@ show_progress() {
         percentage=$((current_size * 100 / total))
         current_hr=$(numfmt --to=iec-i --suffix=B "$current_size")
         total_hr=$(numfmt --to=iec-i --suffix=B "$total")
-        
+
         # Clear entire line before printing
         echo -ne "\r\033[K${BLUE}[${spinner[$((spin++ % 10))]}] Copying: ${percentage}% (${current_hr}/${total_hr})${RESET}"
         sleep 0.1
     done
-    
+
     echo -e "\r\033[K"
 }
 
@@ -150,7 +150,7 @@ cleanup() {
   echo -e "\n${YELLOW}Cleaning up...${RESET}"
   if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
     echo -e "Unmounting ${MOUNT_DIR}..."
-    
+
     # Try different unmount methods in order of preference
     if [ "$MOUNT_METHOD" = "fuse" ]; then
       # For FUSE mounts, try fusermount first, then fallback to umount
@@ -160,13 +160,13 @@ cleanup() {
       umount "$MOUNT_DIR" 2>/dev/null || fusermount -u "$MOUNT_DIR" 2>/dev/null || true
     fi
   fi
-  
+
   # Remove raw image if it was created
   if [ -n "$RAW_IMAGE" ] && [ -f "$RAW_IMAGE" ]; then
     echo -e "Removing temporary raw image..."
     rm -f "$RAW_IMAGE" 2>/dev/null || true
   fi
-  
+
   # Remove mount directory and all contents
   if [ -d "$MOUNT_DIR" ]; then
     echo -e "Removing mount directory..."
@@ -180,12 +180,12 @@ cleanup() {
       rm -rf "$MOUNT_DIR" 2>/dev/null || true
     fi
   fi
-  
+
   # Restore original SELinux status
   if [ "$ORIGINAL_SELINUX" = "Enforcing" ]; then
     setenforce 1 2>/dev/null || true
   fi
-  
+
   echo -e "${GREEN}Cleanup completed.${RESET}"
 }
 
@@ -223,7 +223,7 @@ handle_shared_blocks() {
         touch "${REPACK_INFO}/.has_shared_blocks"
 
         echo -e "${YELLOW}${BOLD}Warning: Incompatible 'shared_blocks' feature detected.${RESET}\n"
-        
+
         # Use the correct e2fsck command to unshare the blocks. Suppress verbose output.
         if e2fsck -E unshare_blocks -fy "$image_file" >/dev/null 2>&1; then
             e2fsck -fy "$image_file" >/dev/null 2>&1
@@ -281,7 +281,7 @@ is_sparse_image() {
 # Function to prepare image for mounting (handle sparse images)
 prepare_image_for_mount() {
     local input="$1"
-    
+
     if is_sparse_image "$input"; then
         echo -e "${YELLOW}Detected sparse image format${RESET}" >&2
         # Ensure TMP_DIR exists
@@ -298,7 +298,7 @@ prepare_image_for_mount() {
             return 1
         fi
     fi
-    
+
     # Not a sparse image, return original
     echo "$input"
     return 0
@@ -308,15 +308,15 @@ prepare_image_for_mount() {
 detect_filesystem() {
     local image="$1"
     local fs_type
-    
+
     # Try blkid first (most reliable)
     fs_type=$(blkid -o value -s TYPE "$image" 2>/dev/null)
-    
+
     if [ -n "$fs_type" ]; then
         echo "$fs_type"
         return 0
     fi
-    
+
     # Fallback to file command
     if file "$image" | grep -qi "ext[234]"; then
         echo "ext4"
@@ -334,7 +334,7 @@ mount_with_fuse() {
     local image="$1"
     local mount_point="$2"
     local fs_type="$3"
-    
+
     case "$fs_type" in
         ext4|ext3|ext2)
             if command -v fuse2fs >/dev/null; then
@@ -372,10 +372,10 @@ mount_with_fuse() {
 get_actual_fs_type() {
     local mount_point="$1"
     local detected_type="$2"
-    
+
     # Get filesystem type from findmnt
     local mount_fs_type=$(findmnt -n -o FSTYPE --target "$mount_point" 2>/dev/null)
-    
+
     # If it's a FUSE mount, extract the actual filesystem type
     if [[ "$mount_fs_type" =~ ^fuse\. ]]; then
         # For FUSE mounts like fuse.fuse2fs, fuse.erofsfuse, return the detected type
@@ -412,12 +412,12 @@ if mount -o loop,seclabel "$MOUNT_IMAGE" "$MOUNT_DIR" 2>/dev/null; then
 else
     echo -e "\n${RED}${BOLD}[!] Traditional mount failed${RESET}"
     echo -e "${RED}Attempting FUSE mount...${RESET}"
-    
+
     if mount_with_fuse "$MOUNT_IMAGE" "$MOUNT_DIR" "$FS_TYPE"; then
         echo -e "\n${GREEN}${BOLD}[✓] Successfully mounted using FUSE${RESET}"
         MOUNT_SUCCESS=true
         MOUNT_METHOD="fuse"
-        
+
         # Warn about SELinux context issues on FUSE mounts
         if command -v getenforce >/dev/null 2>&1; then
             selinux_status=$(getenforce 2>/dev/null)
@@ -578,7 +578,7 @@ if [ "$INTERACTIVE_MODE" = true ] && command -v pv >/dev/null 2>&1; then
 elif [ "$INTERACTIVE_MODE" = true ]; then
     # Interactive mode without pv: Use custom spinner.
     (cd "$MOUNT_DIR" && tar -cf - .) | \
-    (cd "$EXTRACT_DIR" && tar -xf -) & 
+    (cd "$EXTRACT_DIR" && tar -xf -) &
     show_progress $! "$EXTRACT_DIR" "$total_size"
     wait $!
 else
@@ -613,32 +613,32 @@ if [ "$SOURCE_FS_TYPE" == "ext4" ]; then
     if [ -f "${REPACK_INFO}/.has_shared_blocks" ]; then
         echo "ORIGINAL_HAS_SHARED_BLOCKS=true" >> "${REPACK_INFO}/metadata.txt"
         rm -f "${REPACK_INFO}/.has_shared_blocks" # Clean up the marker
-    fi  
-    
+    fi
+
     mounted_image=$(findmnt -n -o SOURCE --target "$MOUNT_DIR")
-    
+
     BLOCK_COUNT=$(get_fs_param "$mounted_image" "Block count")
     echo "ORIGINAL_BLOCK_COUNT=$BLOCK_COUNT" >> "${REPACK_INFO}/metadata.txt"
-    echo "ORIGINAL_BLOCK_SIZE=$(get_fs_param "$mounted_image" "Block size")" >> "${REPACK_INFO}/metadata.txt"    
+    echo "ORIGINAL_BLOCK_SIZE=$(get_fs_param "$mounted_image" "Block size")" >> "${REPACK_INFO}/metadata.txt"
     echo "ORIGINAL_INODE_COUNT=$(get_fs_param "$mounted_image" "Inode count")" >> "${REPACK_INFO}/metadata.txt"
     echo "ORIGINAL_UUID=$(get_fs_param "$mounted_image" "Filesystem UUID")" >> "${REPACK_INFO}/metadata.txt"
     echo "ORIGINAL_VOLUME_NAME=$(get_fs_param "$mounted_image" "Filesystem volume name")" >> "${REPACK_INFO}/metadata.txt"
     echo "ORIGINAL_INODE_SIZE=$(get_fs_param "$mounted_image" "Inode size")" >> "${REPACK_INFO}/metadata.txt"
     FEATURES=$(tune2fs -l "$mounted_image" 2>/dev/null | grep "Filesystem features:" | awk -F':' '{print $2}' | xargs | sed 's/ /,/g')
     echo "ORIGINAL_FEATURES=$FEATURES" >> "${REPACK_INFO}/metadata.txt"
-    
+
     RESERVED_BLOCKS_COUNT=$(get_fs_param "$mounted_image" "Reserved block count")
     # Round up to the nearest integer percentage ( using the (a+b-1)/b formula to round up a/b in truncating arithmetic )
     RESERVED_BLOCKS_PERCENTAGE=$(awk -v r="$RESERVED_BLOCKS_COUNT" -v b="$BLOCK_COUNT" 'BEGIN { printf("%d", (100*r + b - 1) / b) }')
     echo "ORIGINAL_RESERVED_BLOCKS_PERCENTAGE=$RESERVED_BLOCKS_PERCENTAGE" >> "${REPACK_INFO}/metadata.txt"
-    
+
     # Strip <none> values from metadata file (replace =<none> with =)
     sed -i 's/=<none>$/=/' "${REPACK_INFO}/metadata.txt"
-    
+
 elif [ "$SOURCE_FS_TYPE" == "erofs" ]; then
     # Extract EROFS metadata from file command output
     file_output=$(file "$IMAGE_FILE" 2>/dev/null)
-    
+
     # Extract volume label and UUID using awk
     echo "$file_output" | awk -F'[, ]' '{
         for (i=1; i<=NF; i++) {
@@ -651,14 +651,14 @@ elif [ "$SOURCE_FS_TYPE" == "erofs" ]; then
                 gsub(/-/, "", $i)
                 $i = tolower($i)
                 if (length($i) == 32) {
-                    printf "ORIGINAL_UUID=%s-%s-%s-%s-%s\n", 
-                        substr($i,1,8), substr($i,9,4), substr($i,13,4), 
+                    printf "ORIGINAL_UUID=%s-%s-%s-%s-%s\n",
+                        substr($i,1,8), substr($i,9,4), substr($i,13,4),
                         substr($i,17,4), substr($i,21,12)
                 }
             }
         }
     }' >> "${REPACK_INFO}/metadata.txt"
-    
+
     # Strip <none> values from metadata file (replace =<none> with =)
     sed -i 's/=<none>$/=/' "${REPACK_INFO}/metadata.txt"
 fi
