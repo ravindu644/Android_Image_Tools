@@ -23,6 +23,8 @@ detect_os() {
             OS_TYPE="debian"
         elif [[ "$ID_LIKE" == *rhel* ]] || [[ "$ID" == "fedora" ]]; then
             OS_TYPE="rhel"
+        elif [[ "$ID_LIKE" == *arch* ]] || [[ "$ID" == "arch" ]]; then
+            OS_TYPE="arch"
         else
             echo -e "${RED}Unsupported Operating System.${RESET}"
             exit 1
@@ -37,6 +39,8 @@ check_dependencies() {
     local missing_pkgs=()
     local erofs_utils_missing=false
 
+    local update_keyword="update"
+    local install_keyword="install"
     if [ "$OS_TYPE" = "debian" ]; then
         local REQUIRED_PACKAGES=("android-sdk-libsparse-utils" "build-essential" "automake" "autoconf" "libtool" "pkg-config" "git" "fuse3" "e2fsprogs" "pv" "liblz4-dev" "uuid-dev" "libfuse3-dev" "fuse3" "f2fs-tools" "fuse2fs" "attr" "zlib1g-dev" "rsync")
         local check_cmd="dpkg -s"
@@ -45,6 +49,12 @@ check_dependencies() {
         local REQUIRED_PACKAGES=("android-tools" "gcc" "make" "automake" "autoconf" "libtool" "pkgconf" "git" "fuse3" "e2fsprogs" "pv" "lz4-devel" "libuuid-devel" "fuse3-devel" "fuse3" "f2fs-tools" "attr" "zlib-ng-compat-devel" "rsync")
         local check_cmd="rpm -q"
         local install_cmd="dnf"
+    elif [ "$OS_TYPE" = "arch" ]; then
+        local REQUIRED_PACKAGES=("android-tools" "base-devel" "git" "fuse3" "e2fsprogs" "pv" "lz4" "util-linux" "f2fs-tools" "attr" "zlib" "rsync")
+        local check_cmd="pacman -Qi"
+        local install_cmd="pacman"
+        local update_keyword="-Sy"
+        local install_keyword="-S"
     fi
 
     for pkg in "${REQUIRED_PACKAGES[@]}"; do
@@ -90,9 +100,9 @@ check_dependencies() {
         if [ ${#missing_pkgs[@]} -gt 0 ]; then
             local unique_pkgs=$(echo "${missing_pkgs[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' ')
             echo -e "\n${BLUE}Updating package lists...${RESET}"
-            sudo $install_cmd update
+            sudo $install_cmd $update_keyword
             echo -e "\n${BLUE}Installing required packages: $unique_pkgs${RESET}"
-            sudo $install_cmd install -y $unique_pkgs
+            sudo $install_cmd $install_keyword -y $unique_pkgs
         fi
 
         if [ "$erofs_utils_missing" = true ]; then
