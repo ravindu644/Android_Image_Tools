@@ -47,7 +47,7 @@ sudo ./android_image_tools.sh --conf=config.conf
 | Feature | Description |
 |---------|-------------|
 | **Open Source** | Free, transparent, and community-driven |
-| **Cross-Distro Compatible** | Ubuntu/Debian + Fedora/RHEL |
+| **Cross-Distro Compatible** | Ubuntu/Debian + Fedora/RHEL + Arch |
 | **Filesystem Support** | ext4, EROFS, F2FS |
 | **SELinux Preservation** | Maintains Android security contexts |
 | **Interactive GUI** | Easy terminal menu interface |
@@ -62,7 +62,7 @@ sudo ./android_image_tools.sh --conf=config.conf
 ### Prerequisites
 - **Root access** (sudo required)
 - **Architecture**: x86_64 (AMD64) based system required
-- **Supported Distributions**: Ubuntu/Debian-based or Fedora/RHEL-based Linux distributions
+- **Supported Distributions**: Ubuntu/Debian-based, Fedora/RHEL-based or Arch-based Linux distributions
 - **Linux kernel** with loop device support *(preferred method, provides best performance and SELinux compatibility)*
 - **FUSE support** (fallback option for restricted environments, but buggy/limited in SELinux environments)
 
